@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand, CommandError
 
-from runtime.models import Workspace
+from runtime.models import RuntimeOperationState, Workspace
 from runtime.services.runtime_provider import runtime_power_provider
 from runtime.services.runtime_readiness import is_runtime_ready
 from runtime.services.runtime_releases import reconcile_workspace_release
@@ -50,7 +50,10 @@ class Command(BaseCommand):
                 f"{workspace.id}: {result}; generation={workspace.machine_generation}"
             )
             if result == "awaiting_readiness" or (
-                result == "current" and not is_runtime_ready(workspace)
+                result == "current"
+                and workspace.runtime_operation_state
+                == RuntimeOperationState.AWAITING_READINESS
+                and not is_runtime_ready(workspace)
             ):
                 self.stdout.write(
                     "Stopped at the readiness gate. Verify this canary before continuing."

@@ -248,6 +248,42 @@ def test_canary_command_stops_at_readiness(release_setup, monkeypatch):
     assert "awaiting_readiness" in output.getvalue()
     assert "readiness gate" in output.getvalue()
 
+    output = StringIO()
+    call_command(
+        "reconcile_runtime_images", workspace=workspace.tenant_ref, stdout=output
+    )
+    assert "current" in output.getvalue()
+    assert "readiness gate" in output.getvalue()
+
+
+def test_batch_continues_past_current_sleeping_workspace(release_setup, monkeypatch):
+    from runtime.management.commands import reconcile_runtime_images as command
+
+    workspace, provider, _ = release_setup
+    monkeypatch.setenv("HERMES_IMAGE", OLD["hermes"])
+    monkeypatch.setenv("RUNTIME_IMAGE", OLD["allies-runtime"])
+    monkeypatch.setattr(command, "runtime_power_provider", lambda: provider)
+    other = Workspace.objects.create(
+        tenant_ref="next-workspace",
+        machine_generation=1,
+        provisioning_phase="machine_created",
+    )
+    calls = []
+
+    def reconcile(workspace_id, **kwargs):
+        calls.append(workspace_id)
+        if workspace_id == other.id:
+            return "busy"
+        return reconcile_workspace_release(workspace_id, **kwargs)
+
+    monkeypatch.setattr(command, "reconcile_workspace_release", reconcile)
+    output = StringIO()
+    call_command("reconcile_runtime_images", batch=True, limit=2, stdout=output)
+    assert set(calls) == {workspace.id, other.id}
+    assert "current" in output.getvalue()
+    assert "Next batch cursor:" in output.getvalue()
+    assert "readiness gate" not in output.getvalue()
+
 
 def queued_turn(workspace):
     profile = RuntimeProfile.objects.create(
