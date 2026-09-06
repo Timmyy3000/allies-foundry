@@ -226,6 +226,37 @@ def test_invalid_digest_never_destroys_machine(release_setup, monkeypatch):
     assert "destroy_machine" not in provider.calls
 
 
+def test_resume_failure_is_attributable_without_secrets_and_continues(
+    release_setup, monkeypatch, caplog
+):
+    from runtime.services import runtime_releases
+
+    workspace, provider, _ = release_setup
+    workspace.release_target = {"attempts": 4}
+    workspace.save()
+    other = Workspace.objects.create(
+        tenant_ref="other-workspace", release_target={"attempts": 1}
+    )
+    calls = []
+
+    def reconcile(workspace_id, **kwargs):
+        calls.append(workspace_id)
+        if workspace_id == workspace.id:
+            raise RuntimeError("secret-credential-must-not-be-logged")
+        return "awaiting_readiness"
+
+    monkeypatch.setattr(runtime_releases, "reconcile_workspace_release", reconcile)
+    report = runtime_releases.resume_runtime_releases(provider, limit=2)
+
+    assert calls == [workspace.id, other.id]
+    assert report.failed == 1
+    assert report.awaiting_readiness == 1
+    assert str(workspace.id) in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "secret-credential-must-not-be-logged" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
 def test_wrong_provider_image_remains_unavailable(release_setup):
     workspace, provider, _ = release_setup
     provider.wrong_image = True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from datetime import timedelta
@@ -36,6 +37,7 @@ from .workspaces import WorkspaceLifecycle, WorkspaceSpec
 
 # Covers bounded lifecycle retries and secret staging, without a second worker.
 RELEASE_CLAIM_SECONDS = 1200
+logger = logging.getLogger(__name__)
 
 
 def resume_runtime_releases(provider, *, limit):
@@ -61,7 +63,12 @@ def resume_runtime_releases(provider, *, limit):
             result = reconcile_workspace_release(workspace_id, provider=provider)
             if result == "awaiting_readiness":
                 report["awaiting_readiness"] += 1
-        except Exception:  # noqa: BLE001 - a failed release must not block other wakes
+        except Exception as exc:  # noqa: BLE001 - keep processing other wakes
+            logger.error(
+                "Runtime release resume failed: workspace_id=%s error_type=%s",
+                workspace_id,
+                type(exc).__name__,
+            )
             report["failed"] += 1
     return RuntimePowerReport(**report)
 
