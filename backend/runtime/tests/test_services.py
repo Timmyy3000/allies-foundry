@@ -179,7 +179,7 @@ def test_concurrent_execution_exact_retries_share_one_execution(workspace, profi
 def test_execution_profile_lookup_retries_transient_lock(
     workspace, profiles, monkeypatch
 ):
-    lookup = RuntimeProfile.objects.select_related("workspace")
+    lookup = RuntimeProfile.objects.only("workspace_id")
     original_get = lookup.get
     calls = []
 
@@ -190,7 +190,7 @@ def test_execution_profile_lookup_retries_transient_lock(
         return original_get(**kwargs)
 
     monkeypatch.setattr(lookup, "get", get_profile)
-    monkeypatch.setattr(RuntimeProfile.objects, "select_related", lambda *_: lookup)
+    monkeypatch.setattr(RuntimeProfile.objects, "only", lambda *_: lookup)
     execution = create_execution(
         workspace.id, profiles[0].id, "lookup-lock", {"message": "same"}
     )
