@@ -39,8 +39,9 @@ available per worker process.
 ## Rollout
 
 Deploy the Foundry migration and API before enabling either sender. Deploy the
-Cloud readiness-hint receiver before enabling Foundry hint delivery. The staging deployment definition in `.railway/railway.ts` supplies a dedicated
-publisher service, restarted and redeployed by the platform. Its watch cadence
+Cloud readiness-hint receiver before enabling Foundry hint delivery. Configure a dedicated publisher service using the same repository and Dockerfile,
+with the following start command. The platform supervises it and redeploys it
+automatically from the staging branch. Its watch cadence
 already defaults to one second. For local operation the equivalent entrypoint is:
 
 ```text
@@ -90,7 +91,9 @@ Existing polling and scheduled reconciliation continue, and durable hint rows
 can be inspected or retried after the receiver is healthy. Leave additive
 columns and rows in place until all old and new binaries have been retired.
 
-Staging infrastructure promotion is documented in `.railway/README.md`.
+The publisher references the API service's DATABASE_URL, DJANGO_DEBUG,
+DJANGO_SECRET_KEY, ALLIES_CLOUD_SERVICE_TOKEN, ALLIES_CLOUD_URL and
+ALLIES_CLOUD_EVENT_SERVICE_TOKEN. It needs no public endpoint or Fly credentials.
 A backend deploy does not update existing Fly container configuration: publish
 and reconcile the compatible runtime image separately. Pool size stays zero
 and idle stopping stays disabled by default. These defaults do not establish a

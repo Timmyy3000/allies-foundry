@@ -4,6 +4,7 @@ import pytest
 
 from allies_runtime.config import (
     CredentialReference,
+    RuntimeSettings,
     SettingsError,
     load_settings,
     validate_image_reference,
@@ -74,6 +75,7 @@ def test_activity_wait_setting_rejects_unbounded_values(value):
 
 
 def test_activity_wait_defaults_on_with_explicit_rollback():
+    assert RuntimeSettings().activity_wait_enabled
     assert load_settings({}).activity_wait_enabled
     assert not load_settings(
         {"ALLIES_RUNTIME_ACTIVITY_WAIT_ENABLED": "false"}

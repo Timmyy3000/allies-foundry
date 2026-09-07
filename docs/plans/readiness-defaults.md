@@ -1,11 +1,9 @@
-# Readiness defaults and managed delivery
+# Readiness defaults
 
-Fast route; Markdown only. One independent PR into dev. User approved useful defaults and a supervised readiness publisher; no live deployment or pool activation.
+Fast route; Markdown only. One independent PR into dev. User approved sensible defaults and a separate Railway readiness publisher. Railway owns autodeployment; no additional GitHub deployment workflow or IaC tooling.
 
-Default Foundry/runtime activity waiting on, retain bounded waits (5 seconds/8 waiters), and use 16 web threads. Enable readiness hints when existing Cloud URL/token are present, preserving explicit rollback overrides and validation. Pool target zero and idle stopping remain unchanged. The publisher already defaults to one-second watch cadence.
+Default Foundry/runtime activity waiting on, retain bounded waits (5 seconds/8 waiters), and use 16 web threads. Enable readiness hints when the existing Cloud URL/token are present, preserving explicit rollback overrides and validation. Pool target zero and idle stopping remain unchanged. The publisher already defaults to a one-second watch cadence.
 
-Define the separate readiness publisher in staging Railway IaC, preserving the three existing services and volume. Reference existing credentials; do not duplicate secrets. Plan-only inspection must show one added publisher and no unrelated changes. A staging-promotion workflow plans and applies the reviewed infrastructure artifact; a staging-scoped GitHub credential is the only new operational input. No infrastructure is applied by this task.
+Configure one staging publisher service from the same repository/Dockerfile, with the readiness publisher watch command as its start command and references to existing database/Cloud credentials. Railway handles subsequent staging deployments and restarts. No per-release operator command.
 
-Acceptance: defaults and explicit opt-outs tested, absent/partial Cloud credentials remain safe, activity fallback tests pass, publisher survives transient delivery failure, full repository validation and independent simplicity/correctness review pass. Run Railway config plan, actionlint, focused pytest and scripts/validate.py. Rollback through existing flag overrides and a reviewed revert; do not remove durable hint rows. Runtime image rollout and initial CI credential setup remain deployment prerequisites, not speed guarantees.
-
-Delivery ends at PR readiness; no recurring monitor requested. Retain this worktree for the owner after handoff.
+Validation: backend558passed/10skipped; runtime411passed/5skipped; dedicated publisher recovery/default cadence test passed. Ruff and web entrypoint default/override smoke passed. Independent simplicity/correctness review clean after aligning RuntimeSettings direct-construction default. Rollback uses explicit flags. Existing Fly image/config reconciliation remains separate; no latency guarantee.

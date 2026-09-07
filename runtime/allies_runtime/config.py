@@ -274,7 +274,7 @@ class RuntimeSettings:
     runtime_image: str | None = None
     source_commit: str = PINNED_HERMES_SOURCE_COMMIT
     wide_events: WideEventSettings = field(default_factory=WideEventSettings)
-    activity_wait_enabled: bool = False
+    activity_wait_enabled: bool = True
     activity_wait_seconds: float = 5.0
 
 
