@@ -13,7 +13,6 @@ import random
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from email.utils import parsedate_to_datetime
@@ -69,6 +68,7 @@ from runtime.providers.protocol import WorkspaceProvider, provider_workspace_con
 from .ready_pool import assign_ready_workspace
 from .retry import run_with_sqlite_lock_retry
 from .runtime_readiness import advance_runtime_start_epoch_locked
+from .timing import observed_timing_phase
 
 # A Machine reconciliation can make four sequential ten-second provider
 # requests (inspect, volume check, create, and timeout reconciliation). Keep
@@ -85,45 +85,22 @@ HEALTH_POLL_SECONDS = 1.0
 REQUIRED_CONTAINERS = frozenset(("hermes", "allies-runtime"))
 
 
-@contextmanager
 def _observed_phase(
     operation: str,
     workspace_id: UUID | str | None = None,
     *,
+    correlation_id: UUID | str | None = None,
     provider_resource_id: str | None = None,
     provider: str | None = None,
 ):
-    started_at = time.monotonic()
-    fields = {
-        "operation": operation,
-        "workspace_id": str(workspace_id) if workspace_id is not None else None,
-        "provider_resource_id": provider_resource_id,
-        "provider": provider,
-    }
-    emit_event(build_event("runtime.operation.started", **fields, outcome="started"))
-    try:
-        yield
-    except BaseException as error:
-        emit_event(
-            build_event(
-                "runtime.operation.failed",
-                **fields,
-                duration_ms=(time.monotonic() - started_at) * 1000,
-                outcome="error",
-                error_type=type(error).__name__,
-                error_code=getattr(error, "code", None),
-            )
-        )
-        raise
-    else:
-        emit_event(
-            build_event(
-                "runtime.operation.succeeded",
-                **fields,
-                duration_ms=(time.monotonic() - started_at) * 1000,
-                outcome="success",
-            )
-        )
+    return observed_timing_phase(
+        operation,
+        workspace_id,
+        emitter=emit_event,
+        correlation_id=correlation_id,
+        provider_resource_id=provider_resource_id,
+        provider=provider,
+    )
 
 
 class WorkspaceReplacementRequiredError(RuntimeConflictError):
@@ -801,7 +778,11 @@ class WorkspaceLifecycle:
         workspace = Workspace.objects.get(pk=workspace_id)
         app_spec = spec.app_spec(workspace_id)
         if claim.phase == WorkspaceProvisioningPhase.APP_READY:
-            with _observed_phase("workspace.provision.app", workspace_id):
+            with _observed_phase(
+                "workspace.provision.app",
+                workspace_id,
+                correlation_id=claim.operation_id,
+            ):
                 app = self._ensure_app(app_spec)
                 self._cas_phase(
                     workspace_id,
@@ -811,7 +792,11 @@ class WorkspaceLifecycle:
                 )
             return None
         if claim.phase == WorkspaceProvisioningPhase.VOLUME_READY:
-            with _observed_phase("workspace.provision.volume", workspace_id):
+            with _observed_phase(
+                "workspace.provision.volume",
+                workspace_id,
+                correlation_id=claim.operation_id,
+            ):
                 volume = self._ensure_volume(spec.volume_spec(workspace_id))
                 self._cas_phase(
                     workspace_id,
@@ -827,7 +812,11 @@ class WorkspaceLifecycle:
             machine_spec = spec.machine_spec(
                 workspace_id, volume_id, claim.target_generation, claim.operation_id
             )
-            with _observed_phase("workspace.provision.machine_create", workspace_id):
+            with _observed_phase(
+                "workspace.provision.machine_create",
+                workspace_id,
+                correlation_id=claim.operation_id,
+            ):
                 machine = self._ensure_machine(workspace_id, machine_spec, volume_id)
                 self._cas_phase(
                     workspace_id,
@@ -839,9 +828,18 @@ class WorkspaceLifecycle:
         if claim.phase == WorkspaceProvisioningPhase.MACHINE_STARTED:
             if not workspace.machine_ref:
                 raise ProviderTerminalError("workspace Machine binding is incomplete")
-            with _observed_phase("workspace.provision.machine_start", workspace_id):
+            with _observed_phase(
+                "workspace.provision.machine_start",
+                workspace_id,
+                correlation_id=claim.operation_id,
+                provider_resource_id=workspace.machine_ref,
+            ):
                 self._start_machine_if_needed(
-                    app_spec.name, workspace.machine_ref, deadline
+                    app_spec.name,
+                    workspace.machine_ref,
+                    deadline,
+                    correlation_id=claim.operation_id,
+                    workspace_id=workspace_id,
                 )
                 self._cas_phase(
                     workspace_id,
@@ -853,7 +851,12 @@ class WorkspaceLifecycle:
         if claim.phase == WorkspaceProvisioningPhase.HEALTHY:
             if not workspace.machine_ref or not workspace.volume_ref:
                 raise ProviderTerminalError("workspace binding is incomplete")
-            with _observed_phase("workspace.provision.machine_health", workspace_id):
+            with _observed_phase(
+                "workspace.provision.machine_health",
+                workspace_id,
+                correlation_id=claim.operation_id,
+                provider_resource_id=workspace.machine_ref,
+            ):
                 self._wait_healthy(app_spec.name, workspace.machine_ref, spec, deadline)
             if before_bind is not None:
                 # The callback is the final activation gate. It runs after
@@ -861,10 +864,18 @@ class WorkspaceLifecycle:
                 # failed authenticated bootstrap cannot leave a usable-looking
                 # Workspace row behind.
                 with _observed_phase(
-                    "workspace.provision.activation_gate", workspace_id
+                    "workspace.provision.activation_gate",
+                    workspace_id,
+                    correlation_id=claim.operation_id,
+                    provider_resource_id=workspace.machine_ref,
                 ):
                     before_bind(workspace_id, spec, claim, deadline)
-            with _observed_phase("workspace.provision.bind", workspace_id):
+            with _observed_phase(
+                "workspace.provision.bind",
+                workspace_id,
+                correlation_id=claim.operation_id,
+                provider_resource_id=workspace.machine_ref,
+            ):
                 return self._bind_idle(workspace_id, claim, workspace.machine_ref, spec)
         raise ProviderTerminalError(f"unsupported ensure phase: {claim.phase}")
 
@@ -883,7 +894,12 @@ class WorkspaceLifecycle:
         previous = claim.previous_machine_ref
 
         if claim.phase == WorkspaceProvisioningPhase.OLD_MACHINE_STOPPED:
-            with _observed_phase("workspace.replace.machine_stop", workspace_id):
+            with _observed_phase(
+                "workspace.replace.machine_stop",
+                workspace_id,
+                correlation_id=claim.operation_id,
+                provider_resource_id=previous,
+            ):
                 if previous:
                     existing = self._inspect_machine_by_id(app_name, previous)
                     if existing is not None:
@@ -937,7 +953,12 @@ class WorkspaceLifecycle:
                 )
             return None
         if claim.phase == WorkspaceProvisioningPhase.OLD_MACHINE_DESTROYED:
-            with _observed_phase("workspace.replace.machine_destroy", workspace_id):
+            with _observed_phase(
+                "workspace.replace.machine_destroy",
+                workspace_id,
+                correlation_id=claim.operation_id,
+                provider_resource_id=previous,
+            ):
                 if previous:
                     existing = self._inspect_machine_by_id(app_name, previous)
                     if existing is not None:
@@ -972,7 +993,11 @@ class WorkspaceLifecycle:
                 )
             return None
         if claim.phase == WorkspaceProvisioningPhase.MACHINE_CREATED:
-            with _observed_phase("workspace.replace.machine_create", workspace_id):
+            with _observed_phase(
+                "workspace.replace.machine_create",
+                workspace_id,
+                correlation_id=claim.operation_id,
+            ):
                 machine_spec = spec.machine_spec(
                     workspace_id, volume_id, claim.target_generation, claim.operation_id
                 )
@@ -987,8 +1012,19 @@ class WorkspaceLifecycle:
         if claim.phase == WorkspaceProvisioningPhase.MACHINE_STARTED:
             if not workspace.machine_ref:
                 raise ProviderTerminalError("replacement Machine is missing")
-            with _observed_phase("workspace.replace.machine_start", workspace_id):
-                self._start_machine_if_needed(app_name, workspace.machine_ref, deadline)
+            with _observed_phase(
+                "workspace.replace.machine_start",
+                workspace_id,
+                correlation_id=claim.operation_id,
+                provider_resource_id=workspace.machine_ref,
+            ):
+                self._start_machine_if_needed(
+                    app_name,
+                    workspace.machine_ref,
+                    deadline,
+                    correlation_id=claim.operation_id,
+                    workspace_id=workspace_id,
+                )
                 self._cas_phase(
                     workspace_id,
                     claim,
@@ -999,7 +1035,12 @@ class WorkspaceLifecycle:
         if claim.phase == WorkspaceProvisioningPhase.HEALTHY:
             if not workspace.machine_ref:
                 raise ProviderTerminalError("replacement Machine is missing")
-            with _observed_phase("workspace.replace.machine_health", workspace_id):
+            with _observed_phase(
+                "workspace.replace.machine_health",
+                workspace_id,
+                correlation_id=claim.operation_id,
+                provider_resource_id=workspace.machine_ref,
+            ):
                 self._wait_healthy(app_name, workspace.machine_ref, spec, deadline)
             if workspace.release_target:
                 machine = self._inspect_machine_by_id(app_name, workspace.machine_ref)
@@ -1010,7 +1051,12 @@ class WorkspaceLifecycle:
                     raise ProviderTerminalError(
                         "replacement images do not match the pinned release"
                     )
-            with _observed_phase("workspace.replace.bind", workspace_id):
+            with _observed_phase(
+                "workspace.replace.bind",
+                workspace_id,
+                correlation_id=claim.operation_id,
+                provider_resource_id=workspace.machine_ref,
+            ):
                 return self._bind_idle(workspace_id, claim, workspace.machine_ref, spec)
         raise ProviderTerminalError(f"unsupported replace phase: {claim.phase}")
 
@@ -1078,7 +1124,13 @@ class WorkspaceLifecycle:
             return None
 
     def _start_machine_if_needed(
-        self, app_name: str, machine_id: str, deadline: float
+        self,
+        app_name: str,
+        machine_id: str,
+        deadline: float,
+        *,
+        correlation_id: UUID | str | None = None,
+        workspace_id: UUID | str | None = None,
     ) -> None:
         attempt = 0
         while time.monotonic() < deadline:
@@ -1098,7 +1150,13 @@ class WorkspaceLifecycle:
             if time.monotonic() >= deadline:
                 break
             try:
-                self.provider.start_machine(app_name, machine_id)
+                with _observed_phase(
+                    "workspace.machine_start_request",
+                    workspace_id,
+                    correlation_id=correlation_id,
+                    provider_resource_id=machine_id,
+                ):
+                    self.provider.start_machine(app_name, machine_id)
             except ProviderRetryableError as exc:
                 delay = START_BACKOFF_SECONDS[
                     min(attempt, len(START_BACKOFF_SECONDS) - 1)
@@ -1124,7 +1182,13 @@ class WorkspaceLifecycle:
                 if time.monotonic() >= deadline:
                     raise
                 continue
-            self._wait_machine_started(app_name, machine_id, deadline)
+            with _observed_phase(
+                "workspace.machine_started_observation",
+                workspace_id,
+                correlation_id=correlation_id,
+                provider_resource_id=machine_id,
+            ):
+                self._wait_machine_started(app_name, machine_id, deadline)
             return
         raise ProviderTimeoutError(
             "workspace Machine start deadline expired", operation="start_machine"
