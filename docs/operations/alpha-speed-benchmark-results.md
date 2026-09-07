@@ -90,7 +90,7 @@ The raw median reductions are **6,179.906 ms** for bootstrap and **6,056.129 ms*
 
 ## Ready-pool proof
 
-`pool-two-ready.json` at `17:19:39.184673+00:00` recorded two distinct ready bundles in `ams` with the target set to 2. Each had generation 1, start epoch 1, a blank-volume marker equal to its volume, zero profiles and executions, one active credential, and the same release fingerprint. A stale third bundle was evicted and is not part of the success pair.
+`pool-two-ready.json` at `17:19:39.184673+00:00` recorded two distinct ready bundles in `ams` with the target set to 2. Each had generation 1, start epoch 1, a blank-volume marker equal to its volume, zero profiles and executions, one active credential, and the same release fingerprint. The failed initial proof bundle was evicted and is not part of the success pair.
 
 `pool-two-assigned.json` at `17:20:20.447344+00:00` shows the same two bundles assigned to two distinct Cloud tenants. For each bundle, the immutable internal workspace, app, machine, volume, generation, start epoch, and blank-volume marker were retained. Each assigned bundle has exactly one active credential, one profile, and one execution. The pool tenant reference changed to the Cloud tenant reference while the provider identity stayed bound to the original bundle.
 
