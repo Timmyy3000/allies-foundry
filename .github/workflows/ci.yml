@@ -20,6 +20,7 @@ permissions:
 
 jobs:
   check:
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     name: Backend and runtime checks
     runs-on: blacksmith-2vcpu-ubuntu-2404
     env:
