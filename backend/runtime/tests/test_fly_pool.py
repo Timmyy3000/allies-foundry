@@ -28,14 +28,6 @@ from runtime.providers import (
 from runtime.providers.fly_pool import FlyPoolAdapter
 
 
-class FakeSecretStore:
-    def __init__(self) -> None:
-        self.removed: list[tuple[str, tuple[str, ...]]] = []
-
-    def remove_many(self, app_ref: str, secret_names: tuple[str, ...]) -> None:
-        self.removed.append((app_ref, secret_names))
-
-
 class FakeProvider:
     def __init__(self, workspace: Workspace, *, owned: bool = True) -> None:
         names = deterministic_resource_names(workspace.id)
@@ -179,6 +171,18 @@ def test_inspect_uses_durable_blank_volume_proof_after_adapter_recreation():
 
 
 @pytest.mark.django_db(transaction=True)
+def test_record_fresh_volume_proves_exact_new_volume_for_resume():
+    workspace = make_workspace()
+    provider = FakeProvider(workspace)
+    adapter = FlyPoolAdapter(provider, lambda _workspace_id: None, organization="org")
+    adapter._fresh_volume_workspaces.add(workspace.id)
+
+    assert adapter.record_fresh_volume(workspace) == workspace.volume_ref
+    assert workspace.id not in adapter._fresh_volume_workspaces
+    assert provider.calls == ["inspect_app", "list_volumes"]
+
+
+@pytest.mark.django_db(transaction=True)
 def test_inspect_rejects_wrong_provider_ownership():
     workspace = make_workspace()
     provider = FakeProvider(workspace, owned=False)
@@ -191,7 +195,7 @@ def test_inspect_rejects_wrong_provider_ownership():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_cleanup_revokes_credentials_and_deletes_exact_resources():
+def test_cleanup_revokes_credentials_and_deletes_exact_resources_and_app_secrets():
     workspace = make_workspace()
     credential = RuntimeCredential.objects.create(
         workspace=workspace,
@@ -199,14 +203,14 @@ def test_cleanup_revokes_credentials_and_deletes_exact_resources():
         machine_generation=1,
     )
     provider = FakeProvider(workspace)
-    secrets = FakeSecretStore()
     adapter = FlyPoolAdapter(
         provider,
         lambda _workspace_id: None,
         organization="org",
-        secret_store=secrets,
     )
 
+    # Deleting the independently verified App removes its scoped Fly secrets;
+    # individual unsets would restart the live runtime and use a guessed name.
     assert adapter.cleanup(workspace)
 
     credential.refresh_from_db()
@@ -223,8 +227,6 @@ def test_cleanup_revokes_credentials_and_deletes_exact_resources():
         "delete_volume",
         "delete_app",
     ]
-    assert secrets.removed[0][0] == workspace.fly_app_ref
-    assert f"ALLIES_FND008_G1_{credential.id.hex[:16].upper()}" in secrets.removed[0][1]
 
 
 @pytest.mark.django_db(transaction=True)

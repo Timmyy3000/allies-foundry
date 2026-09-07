@@ -17,7 +17,6 @@ from runtime.providers.errors import (
 )
 from runtime.providers.fly import deterministic_resource_names
 from runtime.providers.protocol import WorkspaceProvider, provider_workspace_context
-from runtime.services.continuity_proof import FlyCliSecretStore
 from runtime.services.runtime_auth import revoke_runtime_credential
 
 
@@ -29,13 +28,11 @@ class FlyPoolAdapter:
         provider: WorkspaceProvider,
         activator: Callable[[UUID], Any],
         *,
-        secret_store: FlyCliSecretStore | None = None,
         organization: str | None = None,
         blank_probe: Callable[[Workspace], bool] | None = None,
     ) -> None:
         self.provider = provider
         self.activator = activator
-        self.secret_store = secret_store
         self.organization = organization or os.environ.get("FLY_ORG", "").strip()
         if not self.organization:
             raise ProviderInvalidConfigurationError(
@@ -55,7 +52,6 @@ class FlyPoolAdapter:
         return cls(
             runtime_power_provider(),
             Command().activate_registered_workspace,
-            secret_store=FlyCliSecretStore(),
         )
 
     def activate(self, workspace_id: UUID) -> Any:
@@ -72,6 +68,54 @@ class FlyPoolAdapter:
                 self._fresh_volume_workspaces.add(workspace_id)
         with provider_workspace_context(workspace_id):
             return self.activator(workspace_id)
+
+    def record_fresh_volume(self, workspace: Workspace) -> str | None:
+        """Return the exact Volume created by this adapter's fresh activation."""
+
+        if workspace.id not in self._fresh_volume_workspaces:
+            return None
+        names = deterministic_resource_names(workspace.id)
+        if (
+            not workspace.fly_app_ref
+            or not workspace.volume_ref
+            or not workspace.machine_ref
+            or workspace.fly_app_ref != names.app
+        ):
+            return None
+        with provider_workspace_context(workspace.id):
+            app = self.provider.inspect_app(workspace.fly_app_ref)
+            if app is None:
+                raise ProviderNotFoundError(
+                    "fresh pool App is missing", operation="pool.fresh_volume"
+                )
+            self._check_app(app.name, app.organization, workspace.fly_app_ref)
+            volumes = tuple(self.provider.list_volumes(workspace.fly_app_ref))
+            if len(volumes) != 1 or volumes[0].id != workspace.volume_ref:
+                raise ProviderOwnershipError(
+                    "fresh pool Volume identity is ambiguous",
+                    operation="pool.fresh_volume",
+                )
+            volume = volumes[0]
+            self._check_volume(volume, workspace, names.volume)
+            if volume.attached_machine_id != workspace.machine_ref:
+                raise ProviderRetryableError(
+                    "fresh pool Volume is not attached to its Machine",
+                    operation="pool.fresh_volume",
+                )
+        if self.blank_probe is not None:
+            blank = self.blank_probe(workspace)
+            if type(blank) is not bool:
+                raise ProviderRetryableError(
+                    "pool blank-volume probe did not return a boolean",
+                    operation="pool.fresh_volume",
+                )
+            if not blank:
+                raise ProviderOwnershipError(
+                    "fresh pool Volume is not blank",
+                    operation="pool.fresh_volume",
+                )
+        self._fresh_volume_workspaces.discard(workspace.id)
+        return workspace.volume_ref
 
     def inspect(self, workspace: Workspace):
         from runtime.services.ready_pool_maintenance import (
@@ -188,7 +232,6 @@ class FlyPoolAdapter:
                 return True
             self._check_app(app.name, app.organization, app_ref)
             self._revoke_credentials(workspace.id)
-            self._remove_secrets(app_ref, workspace.id)
             if workspace.machine_ref:
                 machine = self._machine(app_ref, workspace.machine_ref)
                 if machine is not None:
@@ -325,20 +368,6 @@ class FlyPoolAdapter:
             raise ProviderRetryableError(
                 "pool Machine destruction is pending", operation="pool.cleanup"
             )
-
-    def _remove_secrets(self, app_ref: str, workspace_id: UUID) -> None:
-        if self.secret_store is None:
-            return
-        names = {
-            "ALLIES_FND008_HERMES_KEY",
-            "ALLIES_FND008_OPENAI_KEY",
-        }
-        for credential in RuntimeCredential.objects.filter(workspace_id=workspace_id):
-            names.add(
-                f"ALLIES_FND008_G{credential.machine_generation}_"
-                f"{credential.id.hex[:16].upper()}"
-            )
-        self.secret_store.remove_many(app_ref, tuple(sorted(names)))
 
     @staticmethod
     def _revoke_credentials(workspace_id: UUID) -> None:

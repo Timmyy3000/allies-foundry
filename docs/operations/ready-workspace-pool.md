@@ -86,12 +86,12 @@ uv --directory backend run --locked python manage.py `
 
 Drain is an operator action. Cleanup rechecks the reserved tenant namespace,
 absence of profiles and executions, and absence of live activation or
-lifecycle claims before touching a provider resource. It stops and destroys
-the exact owned Machine, waits for the exact Volume to detach, removes the
-owned app secrets, revokes owned runtime credentials, deletes the exact
-Volume, and finally deletes the exact App. Assigned or previously used rows
-are refused. Ownership or cleanup failures remain visible for a later
-bounded retry.
+lifecycle claims before touching a provider resource. It revokes owned runtime
+credentials, stops and destroys the exact owned Machine, waits for the exact
+Volume to detach, deletes the exact Volume, and finally deletes the exact App;
+App deletion removes its scoped secrets. Assigned or previously used rows are
+refused. Ownership or cleanup failures remain visible for a later bounded
+retry.
 
 A staged rollout should start with one bundle in a disposable proof region,
 verify two consecutive healthy inspections, and then raise the target to two.

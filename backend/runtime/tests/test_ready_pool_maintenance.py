@@ -13,6 +13,7 @@ from runtime.models import (
     ReadyWorkspaceBundle,
     ReadyWorkspaceBundleState,
     RuntimeCredential,
+    RuntimeOperationState,
     Workspace,
     WorkspaceProvisioningPhase,
 )
@@ -20,6 +21,8 @@ from runtime.providers import ProviderRetryableError
 from runtime.services.ready_pool_maintenance import (
     PoolProviderSnapshot,
     PoolReadinessPending,
+    _Claim,
+    _record_fresh_blank_volume,
     maintain_ready_pool_once,
     pool_config_fingerprint,
 )
@@ -138,6 +141,32 @@ class SlowPoolAdapter(FakePoolAdapter):
         )
 
 
+class PendingFreshVolumeAdapter(FakePoolAdapter):
+    def activate(self, workspace_id):
+        self.activations.append(str(workspace_id))
+        workspace = Workspace.objects.get(pk=workspace_id)
+        operation_id = uuid4()
+        Workspace.objects.filter(pk=workspace_id).update(
+            fly_app_ref=f"app-{workspace.id.hex}",
+            volume_ref=f"volume-{workspace.id.hex}",
+            machine_ref=f"machine-{workspace.id.hex}",
+            machine_generation=1,
+            provisioning_id=operation_id,
+            provisioning_phase=WorkspaceProvisioningPhase.IDLE,
+            runtime_operation_state=RuntimeOperationState.AWAITING_READINESS,
+            applied_images=POOL_IMAGES,
+        )
+        RuntimeCredential.objects.create(
+            workspace_id=workspace_id,
+            token_digest=sha256(str(workspace_id).encode()).hexdigest(),
+            machine_generation=1,
+        )
+        raise PoolReadinessPending()
+
+    def record_fresh_volume(self, workspace):
+        return workspace.volume_ref
+
+
 @pytest.mark.django_db(transaction=True)
 @override_settings(**{**POOL_SETTINGS, "READY_WORKSPACE_POOL_TARGET": 0})
 def test_target_zero_is_a_creation_gate():
@@ -185,6 +214,73 @@ def test_first_pass_prepares_and_promotes_one_complete_bundle():
     assert bundle.blank_volume_ref == bundle.workspace.volume_ref
     assert bundle.phase_claim_owner is None
     assert adapter.activations == [str(bundle.workspace_id)]
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(**POOL_SETTINGS)
+def test_pending_fresh_volume_proof_survives_adapter_recreation():
+    now = timezone.now()
+    first_adapter = PendingFreshVolumeAdapter()
+
+    first = maintain_ready_pool_once(adapter=first_adapter, now=now)
+
+    bundle = ReadyWorkspaceBundle.objects.get()
+    workspace = Workspace.objects.get(pk=bundle.workspace_id)
+    assert first.skipped == 1
+    assert bundle.state == ReadyWorkspaceBundleState.PREPARING
+    assert bundle.blank_volume_ref == workspace.volume_ref
+
+    resumed_at = now + timedelta(seconds=2)
+    Workspace.objects.filter(pk=workspace.pk).update(
+        ready_generation=1,
+        ready_start_epoch=1,
+        ready_boot_id=uuid4(),
+        ready_at=resumed_at,
+        runtime_last_seen_at=resumed_at,
+        runtime_start_epoch=1,
+        runtime_operation_id=None,
+        runtime_operation_state=RuntimeOperationState.IDLE,
+    )
+
+    class ResumeAdapter(FakePoolAdapter):
+        def activate(self, workspace_id):
+            self.activations.append(str(workspace_id))
+
+    second_adapter = ResumeAdapter()
+    second = maintain_ready_pool_once(adapter=second_adapter, now=resumed_at)
+
+    bundle.refresh_from_db()
+    assert second.ready == 1
+    assert bundle.state == ReadyWorkspaceBundleState.READY
+    assert bundle.blank_volume_ref == workspace.volume_ref
+    assert second_adapter.activations == [str(workspace.id)]
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(**POOL_SETTINGS)
+def test_expired_phase_claim_cannot_record_fresh_volume_proof():
+    now = timezone.now()
+    adapter = PendingFreshVolumeAdapter()
+    maintain_ready_pool_once(adapter=adapter, now=now)
+    bundle = ReadyWorkspaceBundle.objects.get()
+    workspace = Workspace.objects.get(pk=bundle.workspace_id)
+    ReadyWorkspaceBundle.objects.filter(pk=bundle.pk).update(
+        blank_volume_ref=None,
+        phase_claim_owner="expired-worker",
+        phase_claim_until=now - timedelta(seconds=1),
+    )
+
+    claim = _Claim(
+        bundle.id,
+        workspace.id,
+        "expired-worker",
+        "prepare",
+    )
+    assert not _record_fresh_blank_volume(
+        claim, workspace.id, workspace.volume_ref, now
+    )
+    bundle.refresh_from_db()
+    assert bundle.blank_volume_ref is None
 
 
 @pytest.mark.django_db(transaction=True)

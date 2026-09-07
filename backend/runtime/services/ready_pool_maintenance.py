@@ -563,11 +563,13 @@ def _run_prepare(
         if not _record_blank_volume(claim, workspace.id, snapshot, completed_at):
             return "skipped"
     except PoolReadinessPending:
+        _persist_pending_fresh_volume(claim, workspace, adapter, clock)
         return _record_pending(claim, config, _clock_now(clock))
     except Exception as exc:  # noqa: BLE001 - classify into durable safe state
         completed_at = _clock_now(clock)
         if _readiness_pending(exc):
-            return _record_pending(claim, config, completed_at)
+            _persist_pending_fresh_volume(claim, workspace, adapter, clock)
+            return _record_pending(claim, config, _clock_now(clock))
         if _is_retryable(exc):
             return _record_retry(
                 claim, _safe_code(exc, "provider_retryable"), config, completed_at
@@ -809,6 +811,85 @@ def _record_blank_volume(
             or bundle.blank_volume_ref not in (None, volume_ref)
             or workspace.volume_ref != volume_ref
             or not _db_blank_ready(workspace, now)
+        ):
+            return False
+        bundle.blank_volume_ref = volume_ref
+        bundle.save(update_fields=["blank_volume_ref", "updated_at"])
+        return True
+
+
+def _persist_pending_fresh_volume(
+    claim: _Claim,
+    workspace: Workspace,
+    adapter: ReadyPoolAdapter,
+    clock: Callable[[], datetime],
+) -> bool:
+    """Persist a fresh-volume proof while readiness remains pending."""
+
+    recorder = getattr(adapter, "record_fresh_volume", None)
+    if not callable(recorder):
+        return False
+    try:
+        workspace.refresh_from_db()
+        volume_ref = recorder(workspace)
+    except Exception:  # noqa: BLE001 - retain the original pending outcome
+        return False
+    return _record_fresh_blank_volume(
+        claim, workspace.id, volume_ref, _clock_now(clock)
+    )
+
+
+def _record_fresh_blank_volume(
+    claim: _Claim,
+    workspace_id: UUID,
+    volume_ref: Any,
+    now: datetime,
+) -> bool:
+    if not isinstance(volume_ref, str) or not volume_ref:
+        return False
+    with transaction.atomic():
+        bundle = (
+            ReadyWorkspaceBundle.objects.select_for_update()
+            .filter(
+                pk=claim.bundle_id,
+                workspace_id=workspace_id,
+                state=ReadyWorkspaceBundleState.PREPARING,
+                phase_claim_owner=claim.owner,
+                phase_claim_until__gt=now,
+            )
+            .first()
+        )
+        workspace = (
+            Workspace.objects.select_for_update().filter(pk=workspace_id).first()
+        )
+        active_credentials = RuntimeCredential.objects.filter(
+            workspace_id=workspace_id,
+            machine_generation=workspace.machine_generation if workspace else 0,
+            revoked_at__isnull=True,
+        ).count()
+        if (
+            bundle is None
+            or workspace is None
+            or bundle.blank_volume_ref not in (None, volume_ref)
+            or not workspace.tenant_ref.startswith(RESERVED_TENANT_PREFIX)
+            or workspace.provisioning_phase != WorkspaceProvisioningPhase.IDLE
+            or workspace.runtime_operation_state
+            not in {
+                RuntimeOperationState.IDLE,
+                RuntimeOperationState.AWAITING_READINESS,
+            }
+            or workspace.release_target
+            or workspace.activation_claim_token is not None
+            or workspace.activation_claim_expires_at is not None
+            or workspace.provisioning_claim_token is not None
+            or workspace.provisioning_claim_expires_at is not None
+            or not workspace.fly_app_ref
+            or workspace.volume_ref != volume_ref
+            or not workspace.machine_ref
+            or workspace.machine_generation <= 0
+            or active_credentials != 1
+            or RuntimeProfile.objects.filter(workspace_id=workspace_id).exists()
+            or Execution.objects.filter(workspace_id=workspace_id).exists()
         ):
             return False
         bundle.blank_volume_ref = volume_ref
