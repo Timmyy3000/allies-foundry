@@ -12,8 +12,10 @@ from allies_runtime import foundry as foundry_module
 from allies_runtime.errors import HermesError
 from allies_runtime.fake import FakeFoundryTransport, FakeHermesClient, FakeProfilePlan
 from allies_runtime.foundry import (
+    ActivityWaitReceipt,
     FencedError,
     FoundryClient,
+    FoundryError,
     FoundryWorker,
     IdempotencyConflictError,
     InvalidCredentialError,
@@ -563,6 +565,203 @@ async def test_worker_idle_claim_backoff_grows_to_bounded_ceiling(monkeypatch):
     assert await worker.run(idle_cycles=6) == ()
     assert foundry.calls == 6
     assert delays == [1.0, 2.0, 4.0, 8.0, 10.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(404, "FOUNDRY_ERROR"), (200, "MALFORMED_RESPONSE")],
+)
+async def test_worker_activity_wait_optional_failures_fall_back_to_polling(
+    monkeypatch, status, code
+):
+    class OptionalWaitFoundry:
+        async def claim(self, _available_slots, *, claim_id):
+            return None
+
+        async def wait_for_activity(self, _after_revision, _wait_seconds):
+            raise FoundryError(
+                "optional activity wait failed", status=status, code=code
+            )
+
+    sleeps: list[float] = []
+
+    async def record_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(foundry_module.asyncio, "sleep", record_sleep)
+    worker = FoundryWorker(
+        OptionalWaitFoundry(),
+        object(),
+        activity_wait_enabled=True,
+    )
+
+    assert await worker.run(idle_cycles=3) == ()
+    assert len(sleeps) == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_activity_wait_setting_mismatch_disables_optional_wait(
+    monkeypatch,
+):
+    class ShortWaitFoundry:
+        calls = 0
+
+        async def claim(self, _available_slots, *, claim_id):
+            return None
+
+        async def wait_for_activity(self, _after_revision, wait_seconds):
+            self.calls += 1
+            assert wait_seconds > 1
+            raise InvalidRequestError("maximum wait is one second", status=422)
+
+    async def no_sleep(_delay):
+        pass
+
+    monkeypatch.setattr(foundry_module.asyncio, "sleep", no_sleep)
+    foundry = ShortWaitFoundry()
+    worker = FoundryWorker(foundry, object(), activity_wait_enabled=True)
+    assert await worker.run(idle_cycles=6) == ()
+    assert foundry.calls == 1
+    assert not worker._activity_wait_enabled
+
+
+@pytest.mark.asyncio
+async def test_worker_activity_changed_path_reconciles_before_claim(monkeypatch):
+    class Reconciler:
+        def __init__(self):
+            self.calls = 0
+
+        async def reconcile(self):
+            self.calls += 1
+
+    class ActivityFoundry:
+        def __init__(self):
+            self.claims = []
+            self.waits = []
+
+        async def claim(self, _available_slots, *, claim_id):
+            self.claims.append(claim_id)
+            return None if len(self.claims) <= 2 else "claim"
+
+        async def wait_for_activity(self, after_revision, wait_seconds):
+            self.waits.append((after_revision, wait_seconds))
+            return ActivityWaitReceipt(revision=7, reason="changed")
+
+    async def run_claim(claim):
+        return claim
+
+    async def no_sleep(_delay):
+        return None
+
+    foundry = ActivityFoundry()
+    reconciler = Reconciler()
+    worker = FoundryWorker(
+        foundry,
+        object(),
+        profile_reconciler=reconciler,
+        activity_wait_enabled=True,
+    )
+    monkeypatch.setattr(worker, "_run_claim", run_claim)
+    monkeypatch.setattr(foundry_module.asyncio, "sleep", no_sleep)
+
+    assert await worker.run(max_turns=1, idle_cycles=None) == ("claim",)
+    assert foundry.waits == [(0, 5.0)]
+    assert worker._activity_revision == 7
+    assert reconciler.calls == 2
+    assert len(foundry.claims) == 3
+    assert len(set(foundry.claims)) == 3
+
+
+@pytest.mark.asyncio
+async def test_worker_activity_timeout_path_keeps_claim_loop_moving(monkeypatch):
+    class ActivityFoundry:
+        def __init__(self):
+            self.claims = 0
+            self.waits = []
+
+        async def claim(self, _available_slots, *, claim_id):
+            self.claims += 1
+            return None if self.claims <= 2 else "claim"
+
+        async def wait_for_activity(self, after_revision, wait_seconds):
+            self.waits.append((after_revision, wait_seconds))
+            return ActivityWaitReceipt(revision=3, reason="timeout")
+
+    sleeps = []
+
+    async def record_sleep(delay):
+        sleeps.append(delay)
+
+    async def run_claim(claim):
+        return claim
+
+    foundry = ActivityFoundry()
+    worker = FoundryWorker(foundry, object(), activity_wait_enabled=True)
+    monkeypatch.setattr(foundry_module.random, "uniform", lambda _low, _high: 0.1)
+    monkeypatch.setattr(foundry_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(worker, "_run_claim", run_claim)
+
+    assert await worker.run(max_turns=1, idle_cycles=None) == ("claim",)
+    assert foundry.waits == [(0, 5.0)]
+    assert worker._activity_revision == 3
+    assert sleeps == [1.0, 0.1]
+
+
+@pytest.mark.asyncio
+async def test_worker_retryable_claim_skips_activity_wait_and_keeps_backoff(
+    monkeypatch,
+):
+    class RetryableFoundry:
+        def __init__(self):
+            self.claims = 0
+            self.waits = []
+
+        async def claim(self, _available_slots, *, claim_id):
+            self.claims += 1
+            if self.claims == 1:
+                raise ServiceUnavailableError("temporarily unavailable")
+
+        async def wait_for_activity(self, after_revision, wait_seconds):
+            self.waits.append((after_revision, wait_seconds))
+            return ActivityWaitReceipt(revision=1, reason="changed")
+
+    sleeps = []
+
+    async def record_sleep(delay):
+        sleeps.append(delay)
+
+    foundry = RetryableFoundry()
+    worker = FoundryWorker(foundry, object(), activity_wait_enabled=True)
+    monkeypatch.setattr(foundry_module.random, "random", lambda: 0.0)
+    monkeypatch.setattr(foundry_module.asyncio, "sleep", record_sleep)
+
+    assert await worker.run(idle_cycles=1, idle_delay=2.0) == ()
+    assert foundry.claims == 2
+    assert foundry.waits == []
+    assert sleeps == [2.0]
+
+
+@pytest.mark.asyncio
+async def test_worker_activity_wait_cancellation_returns_control():
+    started = asyncio.Event()
+
+    class BlockingActivityFoundry:
+        async def wait_for_activity(self, _after_revision, _wait_seconds):
+            started.set()
+            await asyncio.Event().wait()
+
+    worker = FoundryWorker(
+        BlockingActivityFoundry(),
+        object(),
+        activity_wait_enabled=True,
+    )
+    task = asyncio.create_task(worker._wait_for_activity())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert worker._stopping is False
 
 
 @pytest.mark.asyncio
