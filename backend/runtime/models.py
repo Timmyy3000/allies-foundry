@@ -288,6 +288,7 @@ class ReadyWorkspaceBundle(models.Model):
     )
     region = models.CharField(max_length=64)
     release_fingerprint = models.CharField(max_length=255)
+    blank_volume_ref = models.CharField(max_length=255, null=True, blank=True)
     config_version = models.PositiveIntegerField(default=1)
     attempt_count = models.PositiveSmallIntegerField(default=0)
     next_attempt_at = models.DateTimeField(default=timezone.now)

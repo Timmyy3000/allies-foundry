@@ -62,6 +62,7 @@ def create_ready_bundle(*, suffix: str = "1", now=None):
         state=ReadyWorkspaceBundleState.READY,
         region="ams",
         release_fingerprint="release-v1",
+        blank_volume_ref=workspace.volume_ref,
         config_version=1,
         next_attempt_at=now,
         ready_at=now,
@@ -128,6 +129,54 @@ def test_same_tenant_replay_returns_existing_assignment_without_consuming_capaci
 
 
 @pytest.mark.django_db(transaction=True)
+@override_settings(**POOL_SETTINGS)
+def test_assignment_skips_claimed_candidate_for_next_eligible_bundle():
+    now = timezone.now()
+    claimed_workspace, claimed_bundle = create_ready_bundle(suffix="claimed", now=now)
+    eligible_workspace, eligible_bundle = create_ready_bundle(
+        suffix="eligible", now=now + timedelta(seconds=1)
+    )
+    ReadyWorkspaceBundle.objects.filter(pk=claimed_bundle.pk).update(
+        phase_claim_owner="maintenance",
+        phase_claim_until=now + timedelta(minutes=20),
+    )
+
+    assigned = register_workspace(str(uuid4()))
+
+    assert assigned.id == eligible_workspace.id
+    claimed_workspace.refresh_from_db()
+    claimed_bundle.refresh_from_db()
+    eligible_bundle.refresh_from_db()
+    assert claimed_workspace.tenant_ref.startswith("pool:")
+    assert claimed_bundle.state == ReadyWorkspaceBundleState.READY
+    assert eligible_bundle.state == ReadyWorkspaceBundleState.ASSIGNED
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(**POOL_SETTINGS)
+def test_assignment_marks_stale_candidate_and_uses_next_eligible_bundle():
+    now = timezone.now()
+    stale_workspace, stale_bundle = create_ready_bundle(suffix="stale", now=now)
+    eligible_workspace, eligible_bundle = create_ready_bundle(
+        suffix="eligible", now=now + timedelta(seconds=1)
+    )
+    ReadyWorkspaceBundle.objects.filter(pk=stale_bundle.pk).update(
+        expires_at=now - timedelta(seconds=1)
+    )
+
+    assigned = register_workspace(str(uuid4()))
+
+    assert assigned.id == eligible_workspace.id
+    stale_workspace.refresh_from_db()
+    stale_bundle.refresh_from_db()
+    eligible_bundle.refresh_from_db()
+    assert stale_workspace.tenant_ref.startswith("pool:")
+    assert stale_bundle.state == ReadyWorkspaceBundleState.EVICTING
+    assert stale_bundle.safe_error_code == "stale_candidate"
+    assert eligible_bundle.state == ReadyWorkspaceBundleState.ASSIGNED
+
+
+@pytest.mark.django_db(transaction=True)
 @override_settings(**{**POOL_SETTINGS, "READY_WORKSPACE_POOL_TARGET": 0})
 def test_target_zero_uses_normal_registration_path():
     workspace, bundle = create_ready_bundle()
@@ -158,9 +207,10 @@ def test_reserved_pool_reference_cannot_claim_a_bundle():
     [
         lambda now: {"expires_at": now - timedelta(seconds=1)},
         lambda now: {"last_health_at": now - timedelta(seconds=61)},
-        lambda now: {"phase_claim_owner": "maintenance", "phase_claim_until": now},
         lambda now: {"release_fingerprint": "old-release"},
         lambda now: {"config_version": 2},
+        lambda now: {"blank_volume_ref": None},
+        lambda now: {"blank_volume_ref": "different-volume"},
     ],
 )
 def test_stale_candidate_falls_back_and_is_marked_for_eviction(change):
@@ -208,6 +258,23 @@ def test_profile_or_execution_data_disqualifies_a_bundle():
         workspace=workspace,
         ally_ref="existing-ally",
         hermes_profile_key="existing_ally",
+    )
+
+    registered = register_workspace(str(uuid4()))
+
+    assert registered.id != workspace.id
+    bundle.refresh_from_db()
+    assert bundle.state == ReadyWorkspaceBundleState.EVICTING
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(**POOL_SETTINGS)
+def test_duplicate_current_generation_credentials_disqualify_a_bundle():
+    workspace, bundle = create_ready_bundle()
+    RuntimeCredential.objects.create(
+        workspace=workspace,
+        token_digest=sha256(b"duplicate-credential").hexdigest(),
+        machine_generation=workspace.machine_generation,
     )
 
     registered = register_workspace(str(uuid4()))

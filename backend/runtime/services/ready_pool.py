@@ -21,6 +21,7 @@ from runtime.models import (
 from runtime.services.runtime_readiness import is_runtime_ready
 
 RESERVED_TENANT_PREFIX = "pool:"
+MAX_ASSIGNMENT_CANDIDATES = 8
 
 
 def is_canonical_cloud_workspace_ref(value: UUID | str) -> bool:
@@ -61,34 +62,50 @@ def _assign_ready_workspace_once(tenant_ref: str, now: datetime) -> Workspace | 
     if existing is not None:
         return existing
 
-    candidate = (
-        ReadyWorkspaceBundle.objects.select_for_update(skip_locked=True)
-        .filter(state=ReadyWorkspaceBundleState.READY)
-        .order_by("ready_at", "id")
-        .first()
+    candidate_ids = list(
+        ReadyWorkspaceBundle.objects.filter(
+            state=ReadyWorkspaceBundleState.READY,
+            phase_claim_owner__isnull=True,
+            phase_claim_until__isnull=True,
+        )
+        .values_list("pk", flat=True)
+        .order_by("ready_at", "id")[:MAX_ASSIGNMENT_CANDIDATES]
     )
-    if candidate is None:
-        return None
+    for candidate_id in candidate_ids:
+        candidate = (
+            ReadyWorkspaceBundle.objects.select_for_update(skip_locked=True)
+            .filter(
+                pk=candidate_id,
+                state=ReadyWorkspaceBundleState.READY,
+                phase_claim_owner__isnull=True,
+                phase_claim_until__isnull=True,
+            )
+            .first()
+        )
+        if candidate is None:
+            continue
+        workspace = (
+            Workspace.objects.select_for_update()
+            .filter(pk=candidate.workspace_id)
+            .first()
+        )
+        if workspace is None:
+            _try_mark_candidate_evicting(candidate, now, "workspace_missing")
+            continue
+        if not _eligible(candidate, workspace, now):
+            _try_mark_candidate_evicting(candidate, now, "stale_candidate")
+            continue
 
-    workspace = (
-        Workspace.objects.select_for_update().filter(pk=candidate.workspace_id).first()
-    )
-    if workspace is None:
-        _try_mark_candidate_evicting(candidate, now, "workspace_missing")
-        return None
-    if not _eligible(candidate, workspace, now):
-        _try_mark_candidate_evicting(candidate, now, "stale_candidate")
-        return None
-
-    workspace.tenant_ref = tenant_ref
-    workspace.save(update_fields=["tenant_ref", "updated_at"])
-    candidate.state = ReadyWorkspaceBundleState.ASSIGNED
-    candidate.assigned_at = now
-    candidate.safe_error_code = None
-    candidate.save(
-        update_fields=["state", "assigned_at", "safe_error_code", "updated_at"]
-    )
-    return workspace
+        workspace.tenant_ref = tenant_ref
+        workspace.save(update_fields=["tenant_ref", "updated_at"])
+        candidate.state = ReadyWorkspaceBundleState.ASSIGNED
+        candidate.assigned_at = now
+        candidate.safe_error_code = None
+        candidate.save(
+            update_fields=["state", "assigned_at", "safe_error_code", "updated_at"]
+        )
+        return workspace
+    return None
 
 
 def _eligible(
@@ -107,6 +124,8 @@ def _eligible(
     if bundle.config_version != getattr(
         settings, "READY_WORKSPACE_POOL_CONFIG_VERSION", 1
     ):
+        return False
+    if not workspace.volume_ref or bundle.blank_volume_ref != workspace.volume_ref:
         return False
     if bundle.ready_at is None or bundle.expires_at is None or bundle.expires_at <= now:
         return False
@@ -136,11 +155,14 @@ def _eligible(
         return False
     if not is_runtime_ready(workspace, now=now):
         return False
-    if not RuntimeCredential.objects.filter(
-        workspace_id=workspace.id,
-        machine_generation=workspace.machine_generation,
-        revoked_at__isnull=True,
-    ).exists():
+    if (
+        RuntimeCredential.objects.filter(
+            workspace_id=workspace.id,
+            machine_generation=workspace.machine_generation,
+            revoked_at__isnull=True,
+        ).count()
+        != 1
+    ):
         return False
     if RuntimeProfile.objects.filter(workspace_id=workspace.id).exists():
         return False
@@ -204,6 +226,7 @@ def _mark_candidate_evicting(
 
 
 __all__ = [
+    "MAX_ASSIGNMENT_CANDIDATES",
     "RESERVED_TENANT_PREFIX",
     "assign_ready_workspace",
     "is_canonical_cloud_workspace_ref",
