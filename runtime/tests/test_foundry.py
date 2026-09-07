@@ -565,6 +565,135 @@ async def test_worker_idle_claim_backoff_grows_to_bounded_ceiling(monkeypatch):
     assert delays == [1.0, 2.0, 4.0, 8.0, 10.0]
 
 
+@pytest.mark.asyncio
+async def test_worker_materialization_window_covers_worst_idle_phase(monkeypatch):
+    real_sleep = asyncio.sleep
+    now = 0.0
+    created_at = 16.0
+    materialized_at = 24.0
+    dispatch_at = created_at + 14.0
+    delays: list[float] = []
+    claims: list[float] = []
+    materialized = False
+
+    async def advance(delay):
+        nonlocal now
+        delays.append(delay)
+        now += delay
+        await real_sleep(0)
+
+    class Reconciler:
+        async def reconcile(self):
+            nonlocal materialized
+            if not materialized and now >= materialized_at:
+                materialized = True
+                return SimpleNamespace(materialized=(object(),))
+            return SimpleNamespace(materialized=())
+
+    class DispatchFoundry:
+        async def claim(self, _available_slots, *, claim_id):
+            claims.append(now)
+            if now >= dispatch_at:
+                return "dispatch"
+            return None
+
+    worker = FoundryWorker(
+        DispatchFoundry(),
+        object(),
+        profile_reconciler=Reconciler(),
+        profile_reconcile_interval=5.0,
+        clock=lambda: now,
+    )
+
+    async def run_claim(claim):
+        return claim
+
+    monkeypatch.setattr(foundry_module.random, "random", lambda: 0.0)
+    monkeypatch.setattr(foundry_module.asyncio, "sleep", advance)
+    monkeypatch.setattr(worker, "_run_claim", run_claim)
+
+    assert await worker.run(max_turns=1, idle_cycles=None) == ("dispatch",)
+    assert dispatch_at == 30.0
+    assert claims == [0.0, 1.0, 3.0, 7.0, 15.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0]
+    assert delays == [1.0, 2.0, 4.0, 8.0, 10.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    assert worker._fast_polls_remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_materialization_window_preserves_failure_backoff(monkeypatch):
+    class Reconciler:
+        async def reconcile(self):
+            return SimpleNamespace(materialized=(object(),))
+
+    remaining_at_claim: list[int] = []
+    responses = iter(
+        (
+            ServiceUnavailableError("temporarily unavailable"),
+            ServiceUnavailableError("temporarily unavailable"),
+            None,
+            "recovered",
+        )
+    )
+    worker_ref: list[FoundryWorker] = []
+
+    class RetryableFoundry:
+        async def claim(self, _available_slots, *, claim_id):
+            remaining_at_claim.append(worker_ref[0]._fast_polls_remaining)
+            response = next(responses)
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+    worker = FoundryWorker(
+        RetryableFoundry(),
+        object(),
+        profile_reconciler=Reconciler(),
+    )
+    worker_ref.append(worker)
+    delays: list[float] = []
+
+    async def record_sleep(delay):
+        delays.append(delay)
+
+    async def run_claim(claim):
+        return claim
+
+    monkeypatch.setattr(foundry_module.random, "random", lambda: 0.0)
+    monkeypatch.setattr(foundry_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(worker, "_run_claim", run_claim)
+
+    assert await worker.run(max_turns=1, idle_cycles=None) == ("recovered",)
+    assert remaining_at_claim == [8, 8, 8, 7]
+    assert delays == [1.0, 2.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_worker_materialization_window_returns_to_idle_backoff(monkeypatch):
+    class Reconciler:
+        async def reconcile(self):
+            return SimpleNamespace(materialized=(object(),))
+
+    class IdleFoundry:
+        async def claim(self, _available_slots, *, claim_id):
+            return None
+
+    worker = FoundryWorker(
+        IdleFoundry(),
+        object(),
+        profile_reconciler=Reconciler(),
+    )
+    delays: list[float] = []
+
+    async def record_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(foundry_module.random, "random", lambda: 0.0)
+    monkeypatch.setattr(foundry_module.asyncio, "sleep", record_sleep)
+
+    assert await worker.run(idle_cycles=11) == ()
+    assert delays == [1.0] * 9 + [2.0]
+
+
 def test_idle_claim_backoff_keeps_jitter_at_ceiling(monkeypatch):
     jitter = iter((0.2, 0.8))
     monkeypatch.setattr(foundry_module.random, "random", lambda: next(jitter))

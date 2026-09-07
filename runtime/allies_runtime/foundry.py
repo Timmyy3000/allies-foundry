@@ -50,6 +50,7 @@ MAX_PROFILE_RECONCILIATION_RETRY_DELAY = 5.0
 MIN_IDLE_BACKOFF_SECONDS = 1.0
 MAX_IDLE_BACKOFF_SECONDS = 10.0
 IDLE_BACKOFF_JITTER_RATIO = 0.25
+POST_MATERIALIZATION_FAST_POLLS = 8
 
 
 def _jittered_idle_delay(base: float, minimum: float) -> float:
@@ -1138,6 +1139,7 @@ class FoundryWorker:
         self._last_readiness_report: float | None = None
         self._active: set[asyncio.Task[Any]] = set()
         self._ambiguous_claims: dict[str, float] = {}
+        self._fast_polls_remaining = 0
         self._stopping = False
 
     @property
@@ -1150,6 +1152,7 @@ class FoundryWorker:
 
     async def stop(self) -> None:
         self._stopping = True
+        self._fast_polls_remaining = 0
         tasks = tuple(self._active)
         if tasks:
             for task in tasks:
@@ -1668,9 +1671,17 @@ class FoundryWorker:
                     retry_pending = False
                 if claim is None:
                     empty += 1
-                    poll_delay = _jittered_idle_delay(idle_backoff, initial_idle_delay)
-                    idle_backoff = min(MAX_IDLE_BACKOFF_SECONDS, idle_backoff * 2)
+                    if self._fast_polls_remaining:
+                        self._fast_polls_remaining -= 1
+                        idle_backoff = initial_idle_delay
+                        poll_delay = initial_idle_delay
+                    else:
+                        poll_delay = _jittered_idle_delay(
+                            idle_backoff, initial_idle_delay
+                        )
+                        idle_backoff = min(MAX_IDLE_BACKOFF_SECONDS, idle_backoff * 2)
                     break
+                self._fast_polls_remaining = 0
                 idle_backoff = initial_idle_delay
                 poll_delay = initial_idle_delay
                 task = asyncio.create_task(self._run_claim(claim))
@@ -1752,7 +1763,9 @@ class FoundryWorker:
             < self._profile_reconcile_interval
         ):
             return
-        await self.profile_reconciler.reconcile()
+        report = await self.profile_reconciler.reconcile()
+        if getattr(report, "materialized", ()):
+            self._fast_polls_remaining = POST_MATERIALIZATION_FAST_POLLS
         self._profiles_reconciled = True
         self._last_profile_reconciliation = self._clock()
         snapshot = getattr(self.foundry, "last_reconciliation_snapshot", None)
