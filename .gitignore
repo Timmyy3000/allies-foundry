@@ -36,3 +36,7 @@ runtime/hermes-image/wheelhouse/*
 .agent/
 .lavish/
 .forest/
+
+# Deployment tooling
+node_modules/
+.railway-config-pull-*/

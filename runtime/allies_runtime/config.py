@@ -338,7 +338,7 @@ def load_settings(env: Mapping[str, object] | None = None) -> RuntimeSettings:
         source_commit=source_commit,
         wide_events=wide_events,
         activity_wait_enabled=_observability_bool(
-            values, "ALLIES_RUNTIME_ACTIVITY_WAIT_ENABLED", False
+            values, "ALLIES_RUNTIME_ACTIVITY_WAIT_ENABLED", True
         ),
         activity_wait_seconds=_bounded_float_setting(
             values,
