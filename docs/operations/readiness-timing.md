@@ -32,6 +32,7 @@ its `outcome` before concluding the Ally is ready.
 | `provisioning.profile_roundtrip` | Profile registration/readiness receipt round trip |
 | `provisioning.activation_roundtrip` | Workspace activation round trip |
 | `readiness.hint_received` | Accepted hint recorded after transaction commit; an instant, not a duration |
+| `readiness.hint_dispatch` | Failed task publication with `broker_unavailable`; the durable due scan remains the fallback |
 | `readiness.hint_to_dispatch_wall` | Wall time since the latest stored hint when this reconciliation starts |
 | `provisioning.ready_committed_wall` | Wall time since the durable provisioning operation was created, emitted after successful readiness/handoff commit |
 
@@ -41,6 +42,9 @@ UUID in `request_id` to join to the Foundry publisher. Resource identities are
 hashed by the event builder; hashes from different service keys are not
 interchangeable. Do not distribute application authentication secrets to make
 hashes match.
+
+Manual recovery clears the previous hint marker, so an old hint does not
+inflate the next hint-to-dispatch sample.
 
 ## Foundry control-plane stages
 
