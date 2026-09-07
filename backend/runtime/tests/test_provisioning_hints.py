@@ -370,3 +370,26 @@ def test_feature_off_does_not_claim_or_post_hints(
     assert delivery.state == ProvisioningHintDeliveryState.PENDING
     assert delivery.delivery_attempts == 0
     assert posted == []
+
+
+def test_delivery_timestamp_records_acknowledgement_after_http(
+    materialization_context, settings, monkeypatch
+):
+    _configure_hints(settings)
+    _accept_receipt(materialization_context)
+    started = timezone.now()
+    acknowledged = started + timedelta(seconds=2)
+    clock = [started]
+    monkeypatch.setattr(hint_service.timezone, "now", lambda: clock[0])
+
+    def post(_claim):
+        clock[0] = acknowledged
+        return 202, ""
+
+    monkeypatch.setattr(hint_service, "_post_hint_to_cloud", post)
+    report = publish_due_profile_readiness_hints(limit=1)
+    delivery = ProvisioningHintDelivery.objects.get(
+        runtime_profile_id=materialization_context[1]
+    )
+    assert report.delivered == 1
+    assert delivery.delivered_at == acknowledged

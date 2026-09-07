@@ -287,12 +287,13 @@ def publish_due_profile_readiness_hints(
     delivered = deferred = exhausted = 0
     for claim in claims:
         status, code = _post_hint_to_cloud(claim)
+        completed_at = now if now is not None else timezone.now()
         if status == 202:
             marked = mark_provisioning_hint_delivery(
                 claim.delivery_id,
                 attempt=claim.attempt,
                 success=True,
-                now=observed_at,
+                now=completed_at,
             )
             delivered += int(marked is not None)
             deferred += int(marked is None)
@@ -306,7 +307,7 @@ def publish_due_profile_readiness_hints(
             success=False,
             safe_error_code=code or "hint_delivery_unavailable",
             terminal=terminal,
-            now=observed_at,
+            now=completed_at,
         )
         if marked is None:
             deferred += 1
