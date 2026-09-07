@@ -20,7 +20,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 from uuid import UUID
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from observability.events import build_event, emit_event
@@ -66,6 +66,7 @@ from runtime.providers import (
 )
 from runtime.providers.protocol import WorkspaceProvider, provider_workspace_context
 
+from .ready_pool import assign_ready_workspace
 from .retry import run_with_sqlite_lock_retry
 from .runtime_readiness import advance_runtime_start_epoch_locked
 
@@ -149,10 +150,24 @@ def register_workspace(workspace_id: UUID | str) -> Workspace:
 
     @transaction.atomic
     def register_once() -> Workspace:
-        workspace, _ = Workspace.objects.get_or_create(
-            tenant_ref=tenant_ref,
-        )
-        return workspace
+        existing = Workspace.objects.filter(tenant_ref=tenant_ref).first()
+        if existing is not None:
+            return existing
+
+        assigned = assign_ready_workspace(tenant_ref)
+        if assigned is not None:
+            return assigned
+
+        try:
+            # Keep the uniqueness race in a savepoint so the winner can be
+            # reread without poisoning the registration transaction.
+            with transaction.atomic():
+                return Workspace.objects.create(tenant_ref=tenant_ref)
+        except IntegrityError:
+            winner = Workspace.objects.filter(tenant_ref=tenant_ref).first()
+            if winner is not None:
+                return winner
+            raise
 
     return run_with_sqlite_lock_retry(register_once)
 
