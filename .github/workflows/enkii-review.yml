@@ -12,7 +12,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: enkii-pr-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name }}
+  group: enkii-pr-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata' || 'review' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) }}
 
 jobs:
