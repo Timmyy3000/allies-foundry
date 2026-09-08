@@ -31,3 +31,9 @@ one CLI operation. Configure production reviewers on the
 images. Railway redeploys services that reference the changed shared values;
 existing Fly machines reconcile to the pair through Foundry's normal image
 update flow.
+
+Promotion updates are serialized per environment, but a concurrency lock cannot
+order a re-run against a newer dispatch. Release operators must dispatch the
+current intended commit and must not re-run an older `update-railway` job after
+a newer promotion; dispatch the current commit again instead. Revisit this
+operator fence if a source-commit downgrade check is added.

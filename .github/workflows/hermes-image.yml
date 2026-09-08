@@ -206,7 +206,7 @@ jobs:
           set -euo pipefail
           : "${RAILWAY_TOKEN:?RAILWAY_TOKEN secret is required}"
           : "${RAILWAY_PROJECT_ID:?RAILWAY_PROJECT_ID variable is required}"
-          npx -y @railway/cli@5.45.3 variable set \
+          npx -y @railway/cli@5.45.3 variables set \
             "HERMES_IMAGE=$HERMES_IMAGE" \
             "RUNTIME_IMAGE=$RUNTIME_IMAGE" \
             --project "$RAILWAY_PROJECT_ID" \
