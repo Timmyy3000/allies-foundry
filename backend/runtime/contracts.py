@@ -389,7 +389,7 @@ def build_event_envelope(execution, attempt, event) -> FoundryEventEnvelope | No
         raise RuntimeValidationError(
             "event exceeds the bounded Cloud projection budget"
         )
-    payload = _wire_event_payload(event_type, event.payload)
+    payload = _wire_event_payload(event_type, event.payload, issued_at=event.created_at)
     envelope = FoundryEventEnvelope(
         schema_version=CONTRACT_VERSION,
         kind=EVENT_KIND,
@@ -504,7 +504,12 @@ def _validate_event_payload(
             raise RuntimeValidationError("approval resolution payload is invalid")
 
 
-def _wire_event_payload(event_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+def _wire_event_payload(
+    event_type: str,
+    payload: Mapping[str, Any],
+    *,
+    issued_at: datetime,
+) -> dict[str, Any]:
     if event_type == "execution.accepted":
         return {"status": "accepted"}
     if event_type == "message.delta":
@@ -525,7 +530,7 @@ def _wire_event_payload(event_type: str, payload: Mapping[str, Any]) -> dict[str
             raise RuntimeValidationError("failure event payload is invalid")
         return {"code": code, "retryable": retryable}
     if event_type == "execution.awaiting_action":
-        _validate_event_payload(event_type, payload)
+        _validate_event_payload(event_type, payload, issued_at=issued_at)
         return dict(payload)
     if event_type == "execution.stopped":
         reason = payload.get("reason")
