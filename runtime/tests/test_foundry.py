@@ -1344,6 +1344,105 @@ async def test_wait_for_approval_returns_terminal_foundry_states(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "transient_error",
+    [ResponseLossError, RateLimitedError, ServiceUnavailableError],
+)
+async def test_wait_for_approval_retries_transient_foundry_status_errors(
+    transient_error,
+):
+    class RetryingPollFoundry:
+        def __init__(self):
+            self.calls = 0
+
+        async def approval_status(self, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                raise transient_error("temporary")
+            return {
+                "approval_request_id": "approval-request",
+                "status": "decision_recorded",
+                "decision": "approve",
+                "acknowledgement_deadline_at": _approval_expiry(),
+            }
+
+    foundry = RetryingPollFoundry()
+    worker = FoundryWorker(
+        foundry,
+        object(),
+        approval_poll_interval=0.001,
+    )
+
+    result = await worker._wait_for_approval(
+        _worker_claim(),
+        "approval-request",
+        _approval_expiry(),
+        asyncio.Event(),
+    )
+
+    assert result[:2] == ("decision", "approve")
+    assert foundry.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_wait_for_approval_rejects_synchronous_status_poll_without_calling():
+    calls = []
+
+    class SyncPollFoundry:
+        def approval_status(self, *_args):
+            calls.append(True)
+            return {}
+
+    worker = FoundryWorker(SyncPollFoundry(), object())
+    with pytest.raises(FoundryError, match="must be asynchronous") as error:
+        await worker._wait_for_approval(
+            _worker_claim(),
+            "approval-request",
+            _approval_expiry(),
+            asyncio.Event(),
+        )
+
+    assert error.value.code == "APPROVAL_UNAVAILABLE"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_approval_stops_after_transient_error_consumes_expiry(
+    monkeypatch,
+):
+    wall_times = iter((100.0, 100.2))
+    sleeps = []
+
+    def fake_time():
+        return next(wall_times, 100.2)
+
+    async def record_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(foundry_module.time, "time", fake_time)
+    monkeypatch.setattr(foundry_module.asyncio, "sleep", record_sleep)
+
+    class ExpiredPollFoundry:
+        async def approval_status(self, *_args):
+            raise ResponseLossError("temporary")
+
+    worker = FoundryWorker(
+        ExpiredPollFoundry(),
+        object(),
+        approval_poll_interval=0.001,
+    )
+    result = await worker._wait_for_approval(
+        _worker_claim(),
+        "approval-request",
+        datetime.fromtimestamp(100.1, UTC),
+        asyncio.Event(),
+    )
+
+    assert result == ("expired", None, None)
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "payload",
     [
         {

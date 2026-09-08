@@ -1453,22 +1453,34 @@ class FoundryWorker:
                 "Foundry approval polling was unavailable",
                 code="APPROVAL_UNAVAILABLE",
             )
+        if not inspect.iscoroutinefunction(poll):
+            # Approval polling is async by contract; never invoke an unbounded sync adapter.
+            raise FoundryError(
+                "Foundry approval polling must be asynchronous",
+                code="APPROVAL_UNAVAILABLE",
+            )
         while not lost.is_set():
             remaining = expiry - time.time()
             if remaining <= 0:
                 return "expired", None, None
-            status_result = poll(
-                claim.attempt_id,
-                claim.lease_token,
-                approval_request_id,
-            )
-            if inspect.isawaitable(status_result):
-                try:
-                    status = await asyncio.wait_for(status_result, remaining)
-                except TimeoutError:
+            try:
+                status = await asyncio.wait_for(
+                    poll(
+                        claim.attempt_id,
+                        claim.lease_token,
+                        approval_request_id,
+                    ),
+                    remaining,
+                )
+            except TimeoutError:
+                return "expired", None, None
+            except (ResponseLossError, RateLimitedError, ServiceUnavailableError):
+                # The status read is idempotent; keep the bounded wait alive.
+                remaining = expiry - time.time()
+                if remaining <= 0:
                     return "expired", None, None
-            else:
-                status = status_result
+                await asyncio.sleep(min(self._approval_poll_interval, remaining))
+                continue
             reported_request_id = getattr(status, "approval_request_id", None)
             state = getattr(status, "status", None)
             decision = getattr(status, "decision", None)
@@ -1505,6 +1517,9 @@ class FoundryWorker:
                 return "expired", None, None
             if state in {"cancelled", "outcome_unknown"}:
                 return state, None, None
+            remaining = expiry - time.time()
+            if remaining <= 0:
+                return "expired", None, None
             await asyncio.sleep(min(self._approval_poll_interval, remaining))
         return "cancelled", None, None
 
