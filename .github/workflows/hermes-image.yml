@@ -153,6 +153,16 @@ jobs:
           image="ghcr.io/${IMAGE_OWNER,,}/allies-runtime"
           docker buildx build \
             --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --load \
+            --tag allies-runtime:ci \
+            --file runtime/Dockerfile \
+            runtime
+          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' allies-runtime:ci)" = '["python","-m","allies_runtime"]'
+          docker run --rm --entrypoint python allies-runtime:ci -c 'import allies_runtime'
+          docker buildx build \
+            --platform linux/amd64 \
             --provenance=true \
             --sbom=true \
             --push \
@@ -177,10 +187,13 @@ jobs:
 
   update-railway:
     name: Update Foundry ${{ inputs.railway_environment }} images
-    if: github.event_name == 'workflow_dispatch' && inputs.railway_environment != 'none'
+    if: github.event_name == 'workflow_dispatch' && (inputs.railway_environment == 'staging' || inputs.railway_environment == 'production')
     needs: build
     runs-on: blacksmith-2vcpu-ubuntu-2404
     environment: ${{ inputs.railway_environment == 'production' && 'foundry / production' || 'foundry / staging' }}
+    concurrency:
+      group: publish-runtime-images-${{ inputs.railway_environment }}
+      cancel-in-progress: false
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
