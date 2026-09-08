@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -21,6 +22,8 @@ from allies_runtime.errors import (
     HermesTranscriptConflict,
 )
 from allies_runtime.hermes import (
+    _ACTIVITY_KIND_ALIASES,
+    ACTIVITY_KINDS,
     HermesBootstrap,
     HermesClient,
     UnixSocketCredentialResolver,
@@ -1009,6 +1012,20 @@ def test_correlated_activity_completion_is_id_based_and_preserves_out_of_order_r
         "duration_ms": 125,
     }
     assert stream._active_activity_calls == {}
+
+
+def test_producer_activity_kinds_and_aliases_match_contract_fixture():
+    activity_contract_path = (
+        Path(__file__).resolve().parents[2]
+        / "docs"
+        / "contracts"
+        / "activity-presentation-v1.json"
+    )
+    activity_contract = json.loads(activity_contract_path.read_text(encoding="utf-8"))
+    fixture_kinds = set(activity_contract["activity_kinds"])
+
+    assert ACTIVITY_KINDS == fixture_kinds
+    assert set(_ACTIVITY_KIND_ALIASES.values()) <= fixture_kinds
 
 
 def test_activity_kind_normalization_is_allowlisted_and_legacy_shape_stays_exact():
