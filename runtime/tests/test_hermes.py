@@ -900,6 +900,22 @@ def test_incremental_stream_rejects_typed_result_before_later_tool_result():
         )
 
 
+def test_incremental_stream_rejects_typed_result_response_before_assistant_call():
+    messages = _routine_tool_messages()
+    messages.reverse()
+    stream = _running_activity_stream(routine_result=True)
+    with pytest.raises(HermesMalformedResponse, match="preceded"):
+        stream._normalize_event(
+            "run.completed",
+            {
+                "session_id": "s1",
+                "run_id": "r1",
+                "completed": True,
+                "messages": messages,
+            },
+        )
+
+
 def _running_activity_stream(*, routine_result=False):
     stream = _IncrementalHTTPStream(
         object(), "ally-a", "s1", routine_result=routine_result

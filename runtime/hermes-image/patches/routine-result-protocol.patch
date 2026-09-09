@@ -1,7 +1,7 @@
 diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
 --- a/gateway/platforms/api_server.py
 +++ b/gateway/platforms/api_server.py
-@@ -136,4 +136,27 @@ logger = logging.getLogger(__name__)
+@@ -136,4 +136,37 @@ logger = logging.getLogger(__name__)
  
  
 +_ALLIES_ROUTINE_RESULT_HEADER = "X-Allies-Routine-Result"
@@ -18,13 +18,23 @@ diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
 +def _allies_routine_enabled_toolsets(
 +    toolsets: list[str] | set[str], *, routine_result: bool
 +) -> list[str]:
-+    enabled = [
-+        toolset for toolset in toolsets
-+        if toolset != _ALLIES_ROUTINE_RESULT_TOOLSET
-+    ]
++    from toolsets import get_toolset_names
++
++    enabled: list[str] = []
++    for toolset in toolsets:
++        if toolset == _ALLIES_ROUTINE_RESULT_TOOLSET:
++            continue
++        if not routine_result and toolset in {"all", "*"}:
++            enabled.extend(
++                name
++                for name in get_toolset_names()
++                if name != _ALLIES_ROUTINE_RESULT_TOOLSET
++            )
++            continue
++        enabled.append(toolset)
 +    if routine_result:
 +        enabled.append(_ALLIES_ROUTINE_RESULT_TOOLSET)
-+    return enabled
++    return list(dict.fromkeys(enabled))
 +
 +
  def _hermes_version() -> str:
@@ -36,7 +46,7 @@ diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
 +        routine_result: bool = False,
      ) -> Any:
          """
-@@ -2805,5 +2824,8 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -2805,5 +2824,14 @@ class APIServerAdapter(BasePlatformAdapter):
  
          user_config = _load_gateway_config()
 -        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
@@ -45,7 +55,18 @@ diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
 +            routine_result=routine_result,
 +        )
  
++        # Apply the private toolset as a final subtraction in ordinary mode.
++        # This keeps a user-defined composite toolset from reintroducing the
++        # routine-only result tool after enabled-toolset resolution.
++        disabled_toolsets = (
++            [] if routine_result else [_ALLIES_ROUTINE_RESULT_TOOLSET]
++        )
          max_iterations = _current_max_iterations()
+@@ -2826,3 +2835,4 @@ class APIServerAdapter(BasePlatformAdapter):
+             "ephemeral_system_prompt": ephemeral_system_prompt or None,
+             "enabled_toolsets": enabled_toolsets,
++            "disabled_toolsets": disabled_toolsets,
+             "session_id": session_id,
 @@ -3647,3 +3660,8 @@ class APIServerAdapter(BasePlatformAdapter):
          if system_prompt is not None and not isinstance(system_prompt, str):
              return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)

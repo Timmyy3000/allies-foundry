@@ -607,18 +607,18 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
     if len(calls) != 1:
         raise HermesMalformedResponse("Hermes routine result tool call was duplicated")
 
-    message_index, call_index, call_id, arguments = calls[0]
-    if last_assistant_tool_call != (message_index, call_index):
+    call_message_index, call_index, call_id, arguments = calls[0]
+    if last_assistant_tool_call != (call_message_index, call_index):
         raise HermesMalformedResponse(
             "Hermes routine result tool call was not the final assistant tool call"
         )
     matching_results: list[Any] = []
     matching_result_positions: list[int] = []
     tool_result_positions: list[int] = []
-    for message_index, message in enumerate(messages):
+    for result_message_index, message in enumerate(messages):
         if not isinstance(message, Mapping) or message.get("role") != "tool":
             continue
-        tool_result_positions.append(message_index)
+        tool_result_positions.append(result_message_index)
         tool_call_id = message.get("tool_call_id")
         if not isinstance(tool_call_id, str) or not _TOOL_CALL_ID.fullmatch(
             tool_call_id
@@ -644,10 +644,14 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
                 raise HermesMalformedResponse(
                     "Hermes routine result tool response was not JSON"
                 ) from exc
-            matching_result_positions.append(message_index)
+            matching_result_positions.append(result_message_index)
     if len(matching_results) != 1:
         raise HermesMalformedResponse(
             "Hermes routine result tool response was missing or duplicated"
+        )
+    if matching_result_positions[0] <= call_message_index:
+        raise HermesMalformedResponse(
+            "Hermes routine result tool response preceded its assistant tool call"
         )
     if (
         not tool_result_positions
