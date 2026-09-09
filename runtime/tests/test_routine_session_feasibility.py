@@ -1076,6 +1076,7 @@ def test_offline_checks_bound_blocking_initial_remember(tmp_path):
         assert by_name["shared_profile_concurrent_writes"]["status"] == "blocked"
         assert by_name["fresh_shared_session_recall"]["status"] == "blocked"
         assert by_name["fresh_shared_session_contention_recall"]["status"] == "blocked"
+        assert by_name["second_profile_cannot_read_shared_fact"]["status"] == "blocked"
     finally:
         for provider in Provider.instances:
             provider.release.set()

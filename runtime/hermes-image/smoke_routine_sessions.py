@@ -659,8 +659,14 @@ def _offline_memory_checks(
                         "blocked",
                         "skipped after bounded contention-write timeout",
                     ),
+                    _check(
+                        "second_profile_cannot_read_shared_fact",
+                        "blocked",
+                        "skipped after bounded contention-write timeout",
+                    ),
                 )
             )
+            return
         try:
             isolated_recall = _call_until(
                 lambda: _tool_result(
