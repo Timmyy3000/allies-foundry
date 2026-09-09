@@ -1,6 +1,6 @@
 # FND-012 routine conversations plan
 
-Status: revised once against Sol's ADV-001..005 and SIM-001..003 findings; implementation is proceeding against the released fixture validators and contract-independent runtime groundwork. Deferred interfaces and capability gates below still block routine release. Route: full. HTML required: no. The earlier review record describes the original draft; dispositions at the end of this plan govern this revision.
+Status: revised once against Sol's ADV-001..005 and SIM-001..003 findings; implementation is proceeding against the accepted routines-v1 revision-8 successor and contract-independent runtime groundwork. Deferred interfaces and capability gates below still block routine release. Route: full. HTML required: no. The earlier review record describes the original draft; dispositions at the end of this plan govern this revision.
 
 ## Feature Overview
 
@@ -10,15 +10,15 @@ Execute each routine in a fresh conversation using its Ally's existing profile, 
 
 Repository baseline: `e8285f9211b50cb9cbda05bad2ff07446ff6b44b` on `ft/fnd-012-routine-conversations`. Read `episode-state.md`, `AGENTS.md`, `ENGINEERING_STYLE.md`, `docs/templates/PLAN_TEMPLATE.md`, README, Makefile, both package/test configurations, `.github/workflows/ci.yml`, and `scripts/validate.py`. No nested AGENTS.md was found.
 
-Read the accepted Nabu routines specification and FND-012 ticket after the knowledge-space index. They require the management tool bridge as well as execution, approval continuation, and concurrency. The manager subsequently released routines-v1 revision 7 and retained the Class A/Class B limitations. Its older backlog wording does not override that release or this planning request. No Nabu mutation is needed for this proposal.
+Read the accepted Nabu routines specification and FND-012 ticket after the knowledge-space index. They require the management tool bridge as well as execution, approval continuation, and concurrency. The manager subsequently accepted the routines-v1 revision-8 successor, preserving revision 7 as historical, and retained the Class A/Class B limitations. Its older backlog wording does not override that release or this planning request. No Nabu mutation is needed because the canonical ticket already records the successor handoff.
 
 Verified exact SHA-256 values against the preparation and lock:
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `docs/contracts/routines-v1.md` | `0f3ba80c9331914c18d5ff4b7b0358d2afd832a12f7d068213ab1a49f8f32fbf` |
-| `docs/contracts/fixtures/routines-v1.json` | `4b6ea7e917ef7df1e5a50240e6c2a87c0ba6437340de5ff750ea61697ebe6492` |
-| `docs/contracts/routines-v1.lock.json` | `8027382ca5494ec41a54eab18f3f534228a89d63bf31cf6c0112502d46d92bc2` |
+| `docs/contracts/routines-v1.md` | `9e355d7b8ead4d675cd79fef766faa634069117acb0e9927ad02efd8fe202cdc` |
+| `docs/contracts/fixtures/routines-v1.json` | `70028e3e1935fc79b4d6bd4127facb4501c0a97492a808345921f423ec55cec8` |
+| `docs/contracts/routines-v1.lock.json` | `488bad850829212951991f78e34cfd00b3f575969385a35af36761a87c7278e8` |
 
 Read the supplied CLD-012 `docs/operations/routine-session-feasibility.md` in its preparation worktree. Hermes source is pinned to `36cb5ae5530a75def7df3195e49b7a4aa2add482`. Class A had one distinct-session `mnemosyne_remember` failure and two passes against image prefix `sha256:4127ae957bc3d`; concurrent writes remain inconclusive. Class B is setup-blocked, with no verified final image digest or real overlapping-session proof. The cited probe and launcher are absent from this Foundry baseline; bringing reviewed copies into this worktree is an implementation step, not an available command today. The episode's `roadmap/routines-handoffs/FND-012.md` is also absent here; this plan uses the episode, canonical ticket, and directly inspected seams without inventing its contents.
 
@@ -199,7 +199,7 @@ Delivery order follows phases 1 -> 2 -> 3 -> integrated phase 4; the scoped memo
 
 ## Acceptance Criteria
 
-1. Byte-identical revision 7 contracts and legacy execution compatibility remain intact.
+1. Byte-identical revision 8 contracts and legacy execution compatibility remain intact; revision 7 remains preserved as historical predecessor evidence.
 2. Main chat and different same-profile routines overlap with correct identity/history, while duplicate same-routine admission and same-conversation turns serialize.
 3. Fresh run conversations receive the full prompt and authorized shared resources; retries preserve identity and no prior transcript is imported.
 4. Database-clock approval CAS has one winner; effective rejection/expiry/cancellation fences stale work, frees capacity and delivers an outcome.
@@ -296,10 +296,10 @@ Rollback: disable new Cloud routine admission, retain pending deliveries and app
 
 ### Exact open contract questions
 
-These are engineering gaps in the released artifacts, not requests to reconsider settled product behavior. CLD-012/CLD-013 must provide one authoritative interpretation or a coordinated new release; Foundry must not patch revision 7 itself. Independent local implementation and tests can proceed.
+These are engineering gaps in the released artifacts, not requests to reconsider settled product behavior. CLD-012/CLD-013 must provide one authoritative interpretation or a coordinated new release; Foundry must not patch revision 8 itself. Independent local implementation and tests can proceed.
 
-1. What closed JSON shape carries `routine.outcome` and the effective cancellation/fencing receipt, including retired/current fence and terminal cancelled/expired/manual-reconciliation attribution? The prose requires them; the fixture contains only result/approval examples and cancel request. It also requires title snapshot on results while `result.event` omits it. Specify whether terminal result or outcome carries each lifecycle case.
-2. Which additional dispatch snapshot fields are actually on the closed wire? Revision 7 now closes `occurrence_disposition` in `dispatch.command`, while the prose still mentions saved schedule/timezone and the fixture omits those fields. Specify the linked execution identity and occurrence/run cardinality for explicit user retry; the fixture has no retry message. Do not add required fields that reject the released fixture without owner direction.
+1. What closed JSON shape carries `routine.outcome` and the effective cancellation/fencing receipt, including retired/current fence and terminal cancelled/expired/manual-reconciliation attribution? The prose requires them; the fixture contains only result/approval examples and cancel request. Specify whether terminal result or outcome carries each lifecycle case; revision 8 now closes the required result title snapshot.
+2. Which additional dispatch snapshot fields are actually on the closed wire? Revision 8 now closes `occurrence_disposition` in `dispatch.command`, while the prose still mentions saved schedule/timezone and the fixture omits those fields. Specify the linked execution identity and occurrence/run cardinality for explicit user retry; the fixture has no retry message. Do not add required fields that reject the released fixture without owner direction.
 3. What authoritative closed management transport/context interface does CLD-013 publish, and what Cloud-owned insertion evidence satisfies the model-visible result requirement? Management route/confirmation handoff and any missing insertion shapes remain deferred until publication. Foundry will not design or implement an insertion request, append or marker mechanism. Cloud insertion proof and the published management interface are release gates.
 
 The runtime continuation API, final image digest and memory failure locus are inspection/validation work in phases 1 and 4, not unanswered product decisions. Approval duration, expiry equality, replacement winner, unchanged delivery, no-overlap, timezone/DST, and retry safety are already answered and must not be reopened.
@@ -317,4 +317,4 @@ The runtime continuation API, final image digest and memory failure locus are in
 | SIM-002 | Accepted; addressed with ADV-003 | No speculative management tool transport, adapter scaffold or unpublished outcome/cancel response. |
 | SIM-003 | Accepted; addressed in plan | Remove proposed coordinator mode; use production worker seams unless a demonstrated limitation requires reconsideration. |
 
-This plan follows the published revision-7 wire shape, including its `occurrence_disposition` dispatch field, without independently editing the normative artifacts or claiming the deferred Cloud integration and Class B release gates. Implementation and validation records for the scoped Foundry groundwork are maintained in `episode-state.md` and the FND-012 handoff.
+This plan follows the published revision-8 wire shape, including its `occurrence_disposition` dispatch field and required result `title_snapshot`, without independently editing the normative artifacts or claiming the deferred Cloud integration and Class B release gates. Implementation and validation records for the scoped Foundry groundwork are maintained in `episode-state.md` and the FND-012 handoff.

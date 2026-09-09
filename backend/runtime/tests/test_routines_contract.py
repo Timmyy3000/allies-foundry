@@ -18,9 +18,9 @@ def fixture() -> dict:
 
 def test_released_contract_tuple_is_byte_stable():
     expected = {
-        "routines-v1.md": "0f3ba80c9331914c18d5ff4b7b0358d2afd832a12f7d068213ab1a49f8f32fbf",
-        "fixtures/routines-v1.json": "4b6ea7e917ef7df1e5a50240e6c2a87c0ba6437340de5ff750ea61697ebe6492",
-        "routines-v1.lock.json": "8027382ca5494ec41a54eab18f3f534228a89d63bf31cf6c0112502d46d92bc2",
+        "routines-v1.md": "9e355d7b8ead4d675cd79fef766faa634069117acb0e9927ad02efd8fe202cdc",
+        "fixtures/routines-v1.json": "70028e3e1935fc79b4d6bd4127facb4501c0a97492a808345921f423ec55cec8",
+        "routines-v1.lock.json": "488bad850829212951991f78e34cfd00b3f575969385a35af36761a87c7278e8",
     }
     for relative, digest in expected.items():
         assert hashlib.sha256((CONTRACT_ROOT / relative).read_bytes()).hexdigest() == digest
@@ -43,6 +43,14 @@ def test_fixture_message_is_strictly_typed_and_fingerprint_stable(section, name)
     message = fixture()[section][name]
     parsed = parse_routine_message(message)
     assert parsed.fingerprint == routine_fingerprint(parsed)
+
+
+def test_result_preserves_dispatch_title_and_revision_snapshot():
+    dispatch = parse_routine_message(fixture()["dispatch"]["command"])
+    result = parse_routine_message(fixture()["result"]["event"])
+
+    assert result.routine_revision == dispatch.routine_revision
+    assert result.title_snapshot == dispatch.title_snapshot
 
 
 def test_unknown_fields_and_kinds_fail_closed():

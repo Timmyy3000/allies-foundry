@@ -398,6 +398,8 @@ def test_same_profile_routines_have_distinct_leases_and_sessions(routine_context
     event = parse_routine_message(json.loads(event_delivery.envelope_bytes))
     assert isinstance(event, RoutineResult)
     assert event.outcome == "unchanged"
+    assert event.routine_revision == first.routine_revision
+    assert event.title_snapshot == first.title_snapshot
     replay = append_runtime_routine_result(
         state["context"],
         first_claim.attempt_id,

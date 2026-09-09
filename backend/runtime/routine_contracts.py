@@ -154,6 +154,7 @@ class RoutineResult(RoutineEnvelope):
     occurrence_id: UUID
     run_id: UUID
     routine_revision: StrictInt = Field(..., ge=1)
+    title_snapshot: StrictStr = Field(..., min_length=1, max_length=255)
     execution_id: UUID
     attempt_id: UUID
     generation: StrictInt = Field(..., ge=0)
@@ -176,6 +177,7 @@ class RoutineResult(RoutineEnvelope):
             raise ValueError("routine conversations and execution must differ")
         if len(self.text.encode("utf-8")) > MAX_ROUTINE_TEXT_BYTES:
             raise ValueError("result text is too large")
+        _validate_text(self.title_snapshot, 255, "title snapshot")
         if self.outcome == "failed" and not self.text:
             raise ValueError("failed result requires text")
         return self

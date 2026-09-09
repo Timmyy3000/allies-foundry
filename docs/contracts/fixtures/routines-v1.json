@@ -2,7 +2,7 @@
   "contract": {
     "contract_name": "routines",
     "schema_version": "v1",
-    "content_revision": 7,
+    "content_revision": 8,
     "normative_owner": "cloud",
     "compatibility_vendor": "foundry",
     "document_path": "docs/contracts/routines-v1.md",
@@ -711,6 +711,7 @@
       "occurrence_id": "00000000-0000-4000-8000-000000000005",
       "run_id": "00000000-0000-4000-8000-000000000006",
       "routine_revision": 4,
+      "title_snapshot": "Check availability later",
       "execution_id": "00000000-0000-4000-8000-00000000000a",
       "attempt_id": "00000000-0000-4000-8000-00000000000b",
       "generation": 7,
@@ -731,7 +732,7 @@
         "ally_id": "00000000-0000-4000-8000-000000000003",
         "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
       },
-      "fingerprint": "canonical-json-sha256:v1:d05611da58ddb6c2dffdcbd95a547541242b172eefe31dd28bd004dd4f2ba66b"
+      "fingerprint": "canonical-json-sha256:v1:72f21139e340a0fc141dbe9cf52a1360faaf537f6e23f770b1b9437f55b3c898"
     },
     "receipt": {
       "schema_version": "v1",
