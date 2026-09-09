@@ -10,6 +10,7 @@ from allies_runtime.errors import (
     HermesTimeout,
 )
 from allies_runtime.foundry import (
+    MAX_ROUTINE_TEXT_BYTES,
     EventReceipt,
     FencedError,
     FoundryClaim,
@@ -128,6 +129,7 @@ class RecordingHermes:
         bootstrap_failures: list[Exception] | None = None,
         routine_outcome: str | None = None,
         routine_references: object | None = None,
+        routine_text_chunks: list[str] | None = None,
         order: list | None = None,
     ):
         self.failure = failure
@@ -135,6 +137,7 @@ class RecordingHermes:
         self.bootstrap_failures = list(bootstrap_failures or [])
         self.routine_outcome = routine_outcome
         self.routine_references = routine_references
+        self.routine_text_chunks = routine_text_chunks or ["hello"]
         self.order = order
         self.ensured = []
         self.bootstraps = []
@@ -180,14 +183,15 @@ class RecordingHermes:
             raise self.failure
 
         async def events():
-            yield HermesEvent(
-                "message.delta",
-                profile_key,
-                session_id,
-                "run-1",
-                1,
-                {"text": "hello"},
-            )
+            for sequence, text in enumerate(self.routine_text_chunks, start=1):
+                yield HermesEvent(
+                    "message.delta",
+                    profile_key,
+                    session_id,
+                    "run-1",
+                    sequence,
+                    {"text": text},
+                )
             terminal_payload = {"run_id": "run-1", "status": "completed"}
             if self.routine_outcome is not None:
                 terminal_payload["outcome"] = self.routine_outcome
@@ -198,7 +202,7 @@ class RecordingHermes:
                 profile_key,
                 "rotated-1",
                 "run-1",
-                2,
+                len(self.routine_text_chunks) + 1,
                 terminal_payload,
             )
 
@@ -287,6 +291,22 @@ async def test_routine_claim_preserves_explicit_unchanged_outcome_with_text():
     assert result.status == "succeeded"
     assert foundry.routine_results[0]["outcome"] == "unchanged"
     assert foundry.routine_results[0]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_routine_claim_rejects_oversized_text_before_consuming_terminal_event():
+    foundry = RecordingFoundry()
+    hermes = RecordingHermes(
+        routine_outcome="changed",
+        routine_text_chunks=["a" * MAX_ROUTINE_TEXT_BYTES, "overflow"],
+    )
+
+    result = await FoundryWorker(foundry, hermes).run_claim(
+        claim(routine_id="routine-1")
+    )
+
+    assert result.status == "failed"
+    assert foundry.routine_results[0]["outcome"] == "failed"
 
 
 @pytest.mark.asyncio

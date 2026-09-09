@@ -1724,6 +1724,7 @@ class FoundryWorker:
         renewal: asyncio.Task[Any] | None = None
         sequence = 0
         result_text: list[str] = []
+        result_text_bytes = 0
         try:
             try:
                 message = validate_stream_message(
@@ -1892,8 +1893,17 @@ class FoundryWorker:
                     raise HermesError("Hermes event identity did not match claim")
                 if event.name == "message.delta":
                     delta_text = event.payload.get("text")
-                    if isinstance(delta_text, str):
+                    if claim.routine_id is not None and isinstance(delta_text, str):
+                        delta_text_bytes = len(delta_text.encode("utf-8"))
+                        if (
+                            result_text_bytes + delta_text_bytes
+                            > MAX_ROUTINE_TEXT_BYTES
+                        ):
+                            raise HermesMalformedResponse(
+                                "Hermes routine result text was too large"
+                            )
                         result_text.append(delta_text)
+                        result_text_bytes += delta_text_bytes
                 if lost.is_set():
                     break
                 if sequence >= MAX_RUNTIME_EVENT_SEQUENCE:
