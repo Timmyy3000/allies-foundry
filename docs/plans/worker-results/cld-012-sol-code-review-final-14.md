@@ -22,6 +22,7 @@ the exact bytes. The Cloud and Foundry structural tests assert the same value.
 
 - Cloud artifact head: `3af3da24e8f8e516861f34ddaa85442bbe25eaa1`
 - Foundry artifact head: `2626076973cfa52eec00eed265ab045b8b7b9ac5`
+- Foundry final evidence head: `4784900e94ce5c20f5e3f109e91b80937664f932`
 - Contract revision: `14`
 - Contract SHA-256: `f05ab0a1baf63551f426c288f0144484c813b5cda535bf1cf5d614fb7a22ea84`
 - Fixture SHA-256: `2660d30ee73e8f3cebf94340ea1169019e3c937fd01a30bff6d0e16ecd54ab35`
@@ -33,7 +34,9 @@ the exact bytes. The Cloud and Foundry structural tests assert the same value.
 
 - Cloud contract tests: `7 passed`.
 - Foundry vendor contract tests: `5 passed`.
-- Foundry focused feasibility tests: `26 passed`.
+- Foundry focused feasibility tests: `32 passed`.
+- Final-head evidence regressions cover exact readiness output, post-turn
+  assertion validation, and success-status recall gating.
 - Foundry harness syntax compilation and scoped checks passed.
 - Class A remains `INCONCLUSIVE_REVIEW_REQUIRED`; Class B remains
   `SETUP_BLOCKED`.
