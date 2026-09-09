@@ -426,6 +426,14 @@ def acknowledge_stopped(
     def stop_once() -> StopReceipt:
         workspace = Workspace.objects.select_for_update().get(pk=context.workspace_id)
         _check_runtime_workspace(workspace, context)
+        routine = (
+            RoutineExecution.objects.select_for_update()
+            .filter(
+                workspace_id=workspace.id,
+                current_attempt_id=attempt_uuid,
+            )
+            .first()
+        )
         attempt = (
             Attempt.objects.select_for_update()
             .select_related("execution")
@@ -472,13 +480,6 @@ def acknowledge_stopped(
         if lease.state == LeaseState.ACTIVE:
             lease.state = LeaseState.STOPPING
             lease.save(update_fields=["state", "updated_at"])
-        routine = (
-            RoutineExecution.objects.select_for_update()
-            .filter(current_attempt_id=attempt.id)
-            .first()
-            if attempt.execution.source_kind == "routine_dispatch"
-            else None
-        )
         if routine is not None:
             from .routines import _record_routine_result_once
 

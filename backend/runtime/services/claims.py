@@ -387,6 +387,11 @@ def _reconcile_expired_leases(workspace: Workspace) -> None:
         .values_list("id", "attempt_id")[:MAX_AVAILABLE_SLOTS]
     )
     for lease_id, attempt_id in stale_leases:
+        routine = (
+            RoutineExecution.objects.select_for_update()
+            .filter(workspace_id=workspace.id, current_attempt_id=attempt_id)
+            .first()
+        )
         attempt = (
             Attempt.objects.select_for_update()
             .select_related("execution")
@@ -413,7 +418,13 @@ def _reconcile_expired_leases(workspace: Workspace) -> None:
             or lease.expires_at > now
         ):
             continue
-        _reconcile_expired_lease(workspace, profile, attempt, lease)
+        _reconcile_expired_lease(
+            workspace,
+            profile,
+            attempt,
+            lease,
+            routine=routine,
+        )
 
 
 def _reconcile_expired_lease(
@@ -421,15 +432,10 @@ def _reconcile_expired_lease(
     profile: RuntimeProfile,
     attempt: Attempt,
     lease: Lease,
+    *,
+    routine: RoutineExecution | None,
 ) -> None:
     now = timezone.now()
-    routine = (
-        RoutineExecution.objects.select_for_update().filter(
-            execution_id=attempt.execution_id
-        ).first()
-        if attempt.execution.source_kind == "routine_dispatch"
-        else None
-    )
     unresolved = attempt.status in {
         AttemptStatus.QUEUED,
         AttemptStatus.LEASED,
