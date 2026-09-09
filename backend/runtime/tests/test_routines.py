@@ -18,7 +18,9 @@ from runtime.models import (
     ConversationBinding,
     EventDeliveryState,
     Execution,
+    ExecutionEvent,
     ExecutionEventDelivery,
+    ExecutionStatus,
     Lease,
     LeaseState,
     RoutineApprovalAction,
@@ -41,6 +43,7 @@ from runtime.routine_contracts import (
 )
 from runtime.services.attempts import fail_attempt
 from runtime.services.claims import claim_next_execution
+from runtime.services.leases import acknowledge_stopped
 from runtime.services.routines import (
     PROFILE_ID_NAMESPACE,
     accept_routine_dispatch,
@@ -125,9 +128,11 @@ def routine_context(db, monkeypatch):
     }
 
 
-def dispatch_payload(state, *, ordinal: int = 1) -> dict:
+def dispatch_payload(
+    state, *, ordinal: int = 1, routine_id: UUID | None = None
+) -> dict:
     base = state["base"] + timedelta(minutes=ordinal)
-    routine_id = uuid4()
+    routine_id = routine_id or uuid4()
     occurrence_id = uuid4()
     run_id = uuid4()
     run_conversation_id = uuid4()
@@ -168,8 +173,12 @@ def dispatch_payload(state, *, ordinal: int = 1) -> dict:
     return value
 
 
-def dispatch(state, *, ordinal: int = 1) -> tuple[RoutineDispatch, RoutineExecution]:
-    command = RoutineDispatch.model_validate(dispatch_payload(state, ordinal=ordinal))
+def dispatch(
+    state, *, ordinal: int = 1, routine_id: UUID | None = None
+) -> tuple[RoutineDispatch, RoutineExecution]:
+    command = RoutineDispatch.model_validate(
+        dispatch_payload(state, ordinal=ordinal, routine_id=routine_id)
+    )
     receipt = accept_routine_dispatch(command)
     return command, RoutineExecution.objects.get(execution_id=receipt.execution_id)
 
@@ -259,6 +268,39 @@ def test_generic_attempt_failure_is_projected_as_a_routine_result(routine_contex
     assert receipt.status == "failed"
     routine.refresh_from_db()
     assert routine.status == RoutineRunStatus.FAILED
+
+
+def test_stopped_routine_is_terminalized_with_a_failed_result(routine_context):
+    state = routine_context
+    command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+
+    receipt = acknowledge_stopped(
+        state["context"], claim.attempt_id, claim.lease_token, "response_lost"
+    )
+
+    assert receipt.requeued is False
+    routine.refresh_from_db()
+    assert routine.status == RoutineRunStatus.FAILED
+    attempt = routine.current_attempt
+    attempt.refresh_from_db()
+    assert attempt.status == AttemptStatus.FAILED
+    assert Execution.objects.get(pk=routine.execution_id).status == ExecutionStatus.FAILED
+    event = ExecutionEvent.objects.get(attempt_id=attempt.id, event_type="routine.result")
+    assert event.payload["outcome"] == "failed"
+    assert Lease.objects.get(attempt_id=attempt.id).state == LeaseState.RELEASED
+
+    assert (
+        acknowledge_stopped(
+            state["context"], claim.attempt_id, claim.lease_token, "response_lost"
+        )
+        == receipt
+    )
+    _replacement_command, replacement = dispatch(
+        state, ordinal=2, routine_id=command.routine_id
+    )
+    assert replacement.routine_id == command.routine_id
 
 
 def approval_decision_payload(state, routine, action, *, decision: str = "approve") -> dict:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -22,6 +22,7 @@ from runtime.models import (
     ExecutionStatus,
     Lease,
     LeaseState,
+    RoutineExecution,
     RuntimeProfile,
     Workspace,
 )
@@ -405,7 +406,7 @@ def acknowledge_stopped(
     reason: str,
     request_digest: str | None = None,
 ) -> StopReceipt:
-    """Release ACTIVE/STOPPING work and requeue the execution exactly once."""
+    """Release ACTIVE/STOPPING work and terminalize routine stops exactly once."""
 
     from runtime.services.runtime_auth import RuntimeContext
 
@@ -471,7 +472,30 @@ def acknowledge_stopped(
         if lease.state == LeaseState.ACTIVE:
             lease.state = LeaseState.STOPPING
             lease.save(update_fields=["state", "updated_at"])
-        attempt.status = AttemptStatus.UNKNOWN
+        routine = (
+            RoutineExecution.objects.select_for_update()
+            .filter(current_attempt_id=attempt.id)
+            .first()
+            if attempt.execution.source_kind == "routine_dispatch"
+            else None
+        )
+        if routine is not None:
+            from .routines import _record_routine_result_once
+
+            _record_routine_result_once(
+                routine.id,
+                outcome="failed",
+                text="Routine stopped before completion.",
+                references=[],
+                delayed=None,
+                event_id=uuid4(),
+                event_sequence=None,
+                observed_at=timezone.now(),
+            )
+            attempt.status = AttemptStatus.FAILED
+            requeue = False
+        else:
+            attempt.status = AttemptStatus.UNKNOWN
         attempt.stopped_request_digest = canonical_digest
         attempt.stopped_lease_digest = token_digest
         receipt = {
