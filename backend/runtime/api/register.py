@@ -27,6 +27,12 @@ from runtime.management.commands.activate_fly_workspace import (
     Command as ActivateFlyWorkspaceCommand,
 )
 from runtime.models import Workspace
+from runtime.routine_contracts import (
+    RoutineApprovalDecision,
+    RoutineCancelWait,
+    RoutineDispatch,
+    parse_routine_message,
+)
 from runtime.services.activity import wait_for_workspace_activity
 from runtime.services.approvals import (
     read_runtime_approval,
@@ -47,7 +53,12 @@ from runtime.services.profiles import (
     ensure_runtime_profile,
     list_profile_reconciliation,
 )
-from runtime.services.routines import append_runtime_routine_result
+from runtime.services.routines import (
+    accept_routine_dispatch,
+    append_runtime_routine_result,
+    cancel_routine_wait,
+    decide_routine_approval,
+)
 from runtime.services.runtime_auth import authenticate_runtime_token
 from runtime.services.runtime_intents import request_runtime_intent
 from runtime.services.runtime_readiness import accept_runtime_readiness
@@ -369,6 +380,42 @@ def register(api: NinjaExtraAPI) -> None:
         except RuntimeDomainError as exc:
             return _execution_error(exc)
 
+    @api.post("/internal/routines/dispatch", auth=_cloud_service_auth)
+    def routine_dispatch(request: HttpRequest):
+        try:
+            command = _routine_command(request, RoutineDispatch)
+            receipt = accept_routine_dispatch(command)
+            return JsonResponse(receipt.model_dump(mode="json"), status=200)
+        except RuntimeDomainError as exc:
+            return _routine_error(exc)
+
+    @api.post("/internal/routines/approval-decision", auth=_cloud_service_auth)
+    def routine_approval_decision(request: HttpRequest):
+        try:
+            command = _routine_command(request, RoutineApprovalDecision)
+            receipt = decide_routine_approval(command)
+            return JsonResponse(receipt.model_dump(mode="json"), status=200)
+        except RuntimeDomainError as exc:
+            return _routine_error(exc)
+
+    @api.post("/internal/routines/cancel-wait", auth=_cloud_service_auth)
+    def routine_cancel_wait(request: HttpRequest):
+        try:
+            command = _routine_command(request, RoutineCancelWait)
+            receipt = cancel_routine_wait(command)
+            return JsonResponse(
+                {
+                    "code": receipt.code,
+                    "routine_execution_id": str(receipt.routine_execution_id),
+                    "fence": receipt.fence,
+                    "status": receipt.status,
+                    "replayed": receipt.replayed,
+                },
+                status=200,
+            )
+        except RuntimeDomainError as exc:
+            return _routine_error(exc)
+
     @api.post(
         "/internal/approvals/{approval_request_id}/decision", auth=_cloud_service_auth
     )
@@ -587,6 +634,13 @@ def _json_body(request: HttpRequest) -> dict:
     return value
 
 
+def _routine_command(request: HttpRequest, expected_type):
+    command = parse_routine_message(_json_body(request))
+    if not isinstance(command, expected_type):
+        raise RuntimeValidationError("routine command kind is invalid")
+    return command
+
+
 def _authenticate_cloud_service(request: HttpRequest) -> None:
     token = _bearer(request)
     configured = getattr(settings, "ALLIES_CLOUD_SERVICE_TOKEN", None)
@@ -655,6 +709,31 @@ def _execution_error(exc: RuntimeDomainError) -> JsonResponse:
         {
             "code": "CONFLICT",
             "message": "execution request conflicts with existing state",
+        },
+        status=409,
+    )
+
+
+def _routine_error(exc: RuntimeDomainError) -> JsonResponse:
+    if isinstance(exc, RuntimeAuthorizationError):
+        return JsonResponse(
+            {"code": "INVALID_CREDENTIAL", "message": "request is not authorized"},
+            status=401,
+        )
+    if isinstance(exc, RuntimeNotFoundError):
+        return JsonResponse(
+            {"code": "NOT_FOUND", "message": "routine binding is unavailable"},
+            status=404,
+        )
+    if isinstance(exc, RuntimeValidationError):
+        return JsonResponse(
+            {"code": "INVALID_REQUEST", "message": "request is invalid"},
+            status=422,
+        )
+    return JsonResponse(
+        {
+            "code": getattr(exc, "code", "CONFLICT"),
+            "message": "routine request conflicts with existing state",
         },
         status=409,
     )

@@ -610,6 +610,16 @@ def _cancel_routine_wait_once(
     workspace, _ = _resolve_scope(
         command.scope.workspace_id, command.scope.ally_id, command.scope.cloud_binding_id
     )
+    stored = (
+        RoutineCommandReceipt.objects.select_for_update()
+        .filter(workspace_id=workspace.id, idempotency_key=command.idempotency_key)
+        .first()
+    )
+    if stored is not None:
+        _ensure_command_replay(stored, command)
+        return _cancel_receipt_from_json(stored.response)
+    if RoutineCommandReceipt.objects.filter(command_id=command.command_id).exists():
+        raise RuntimeIdempotencyConflictError("command identity already exists")
     routine = (
         RoutineExecution.objects.select_for_update()
         .filter(workspace_id=workspace.id, run_id=command.run_id, current_attempt_id=command.attempt_id)
@@ -626,13 +636,17 @@ def _cancel_routine_wait_once(
     if action is None:
         raise RuntimeNotFoundError("approval request is unavailable")
     if action.status == RoutineApprovalStatus.AUTHORIZING:
-        return RoutineCancelReceipt(
+        response = RoutineCancelReceipt(
             "APPROVAL_ALREADY_AUTHORIZING", routine.id, routine.fence, action.status
         )
+        _store_command_receipt(workspace, command, _cancel_receipt_json(response))
+        return response
     if action.status != RoutineApprovalStatus.PENDING:
-        return RoutineCancelReceipt(
+        response = RoutineCancelReceipt(
             "APPROVAL_ALREADY_TERMINAL", routine.id, routine.fence, action.status
         )
+        _store_command_receipt(workspace, command, _cancel_receipt_json(response))
+        return response
     action.status = RoutineApprovalStatus.CANCELLED
     action.permission_consumed = True
     action.decision = "cancel"
@@ -655,7 +669,9 @@ def _cancel_routine_wait_once(
             attempt_id=attempt.id,
             state__in=(LeaseState.ACTIVE, LeaseState.STOPPING),
         ).update(state=LeaseState.FENCED, updated_at=observed_at)
-    return RoutineCancelReceipt("WAIT_CANCELLED", routine.id, routine.fence, action.status)
+    response = RoutineCancelReceipt("WAIT_CANCELLED", routine.id, routine.fence, action.status)
+    _store_command_receipt(workspace, command, _cancel_receipt_json(response))
+    return response
 
 
 def expire_routine_approvals(
@@ -1157,6 +1173,29 @@ def _require_routine_admission(workspace: Workspace) -> None:
 def _ensure_command_replay(stored: RoutineCommandReceipt, command: Any) -> None:
     if stored.kind != command.kind or stored.fingerprint != command.fingerprint:
         raise RuntimeIdempotencyConflictError("routine command replay conflicts")
+
+
+def _cancel_receipt_json(receipt: RoutineCancelReceipt) -> dict[str, Any]:
+    return {
+        "code": receipt.code,
+        "routine_execution_id": str(receipt.routine_execution_id),
+        "fence": receipt.fence,
+        "status": receipt.status,
+        "replayed": receipt.replayed,
+    }
+
+
+def _cancel_receipt_from_json(value: dict[str, Any]) -> RoutineCancelReceipt:
+    try:
+        return RoutineCancelReceipt(
+            code=value["code"],
+            routine_execution_id=UUID(value["routine_execution_id"]),
+            fence=value["fence"],
+            status=value["status"],
+            replayed=value["replayed"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeConflictError("stored routine cancellation receipt is invalid") from exc
 
 
 def _store_command_receipt(

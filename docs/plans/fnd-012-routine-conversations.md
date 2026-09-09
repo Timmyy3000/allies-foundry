@@ -44,7 +44,7 @@ Read the supplied CLD-012 `docs/operations/routine-session-feasibility.md` in it
 
 ### In Scope
 
-Proceed now with validators for exact released fixture shapes, durable routine execution/session groundwork, scoped lease authority, internal approval/action state invariants, the smallest demonstrated memory-operation fix, and focused PostgreSQL and runtime evidence preparation. Foundry's eventual transport responsibility is emission and reconciliation of released `routine.result`, `routine.approval_requested` and other authoritatively published events through the existing outbox. Management-tool transport/adapters and contract-dependent outcome/cancel shapes are deferred release work, not groundwork.
+Proceed now with validators for exact released fixture shapes, durable routine execution/session groundwork, scoped lease authority, internal approval/action state invariants, authenticated Foundry adapters for the released dispatch/approval/cancel command envelopes, the smallest demonstrated memory-operation fix, and focused PostgreSQL and runtime evidence preparation. Foundry's transport responsibility includes accepting the exact rev9 Cloud commands and emitting/reconciling released `routine.result`, `routine.approval_requested` and other authoritatively published events through the existing outbox. Cloud scheduling, management persistence, and model-visible insertion remain Cloud-owned integration work.
 
 ### Out of Scope
 
@@ -52,7 +52,7 @@ Cloud scheduling/discovery implementation, Foundry main-history append/marker me
 
 ### Dependencies and Assumptions
 
-CLD-013 owns scheduler admission, owner authorization, management persistence, and main-chat insertion. Current work is limited to released fixture validators and contract-independent runtime groundwork. CLD-013 must publish authoritative closed interfaces before management transport/adapters or missing outcome/cancel/insertion shapes are implemented. Cloud insertion remains a Cloud integration dependency, never a Foundry append mechanism. These interfaces, both implementations, the capability gate and real Class B evidence are explicit release gates. Existing slot limits remain capacity controls, not a new product cadence restriction. Configure at least three slots for the main+two-routine acceptance proof.
+CLD-013 owns scheduler admission, owner authorization, management persistence, and main-chat insertion. FND-012 owns the Foundry-side authenticated adapters for the already released `routine.dispatch`, `routine.approval_decision`, and `routine.cancel_wait` envelopes, plus the existing runtime event outbox. Cloud insertion remains a Cloud integration dependency, never a Foundry append mechanism. The Cloud adapter must use the route map selected below without adding wire fields. These interfaces, both implementations, the capability gate and real Class B evidence are explicit release gates. Existing slot limits remain capacity controls, not a new product cadence restriction. Configure at least three slots for the main+two-routine acceptance proof.
 
 The designs below are local implementation choices, not amendments to Cloud's contract. Reconcile the actual FND-010 stop service when it becomes available; preserve its effective-stop evidence rather than introducing a competing public cancel API. A stopped transport alone is not evidence that an external action stopped.
 
@@ -60,14 +60,14 @@ The designs below are local implementation choices, not amendments to Cloud's co
 
 ### Function and Service Shapes
 
-New names below are proposed internal services. Until the closed-interface release gate is satisfied, implement only fixture validation and contract-independent persistence/state transitions; do not expose new routine routes or fabricate transport responses. Keep orchestration in small services and use the existing persistence and transport primitives.
+The service names below are the Foundry implementation seams. Expose only the three authenticated internal command routes selected in this revision; do not add a user-facing route or fabricate fields absent from the released tuple. Keep orchestration in small services and use the existing persistence and transport primitives.
 
 | Location | Symbol/signature | Inputs and validation | Return / effects |
 | --- | --- | --- | --- |
 | `backend/runtime/routine_contracts.py` (new) | `validate_routine_command(value: dict) -> RoutineCommand` | Closed discriminated shapes, exact scope, strict IDs/integers, fingerprint, UTC deadlines, UTF-8 bounds | Validated command; safe error before writes |
 | `backend/runtime/services/routines.py` (new) | `accept_routine_dispatch(command: RoutineDispatch) -> RoutineDispatchReceipt` | Authenticated Cloud scope maps to existing workspace/profile/main binding; immutable tuple and replay checks | Transaction stores execution, reserved attempt, run session, receipt and wake intent |
 | same | `decide_routine_approval(command: RoutineApprovalDecision) -> RoutineApprovalReceipt` | Exact permission/action/run/attempt/generation, pending/unconsumed state, database time | Single CAS consumes permission, persists decision/action intent, or terminal outcome |
-| same | Internal waiting-run cancellation transition; transport signature deferred | Same scope and fence; replacement identity retained | Persist internal fencing evidence; wire receipt waits for CLD-013's closed interface |
+| same | `cancel_routine_wait(command: RoutineCancelWait) -> RoutineCancelReceipt` | Same scope and fence; replacement identity retained | Persist the existing fencing transition and return its bounded receipt (`code`, routine execution, fence, status, replayed) |
 | same | `expire_routine_approvals(limit: int = 20) -> int` | Due pending approvals selected in bounded batches and rechecked after locking | Terminal expiry and outbox in one transaction |
 | existing `services/sessions.py` | `update_session_binding(...) -> binding receipt` | Resolve target from authenticated attempt's execution; caller cannot select another run | Main binding path stays intact; routine path changes only its own session |
 | `runtime/allies_runtime/routines.py` (new) | `resume_approved_action(claim, continuation) -> action receipt` | Durable action identity, current lease, fixed action digest and provider permission | Exact continuation, bounded reconciliation; never resubmit whole prompt |
@@ -75,7 +75,7 @@ New names below are proposed internal services. Until the closed-interface relea
 
 ### API and Transport Contracts
 
-Reuse the existing `/api/v1` authentication and transport mechanisms after CLD-013 publishes the authoritative closed interfaces and route mapping. No new routine route, management adapter, cancellation receipt or insertion shape is selected in this revision. Existing `execution.command` and reconciliation remain unchanged. Validate the released fixture objects now; wire complete handlers only after the interface release gate is satisfied.
+Reuse the existing `/api/v1` authentication and transport mechanisms. Foundry accepts the exact rev9 messages with `Authorization: Bearer ALLIES_CLOUD_SERVICE_TOKEN` through these internal routes: `POST /api/v1/internal/routines/dispatch` -> `RoutineDispatchReceipt`, `POST /api/v1/internal/routines/approval-decision` -> `RoutineApprovalReceipt`, and `POST /api/v1/internal/routines/cancel-wait` -> the existing `RoutineCancelReceipt` fields. All three reject unsupported kinds, unknown fields, invalid fingerprints, stale scope/generation, and conflicting replay identities through the existing safe error mapping. Existing `execution.command` and reconciliation remain unchanged. Cloud event ingestion remains `POST /api/v1/internal/foundry/events` on the Cloud side, with the existing direction-scoped event bearer and `202 {event_id,status}` receipt.
 
 Use fixture JSON objects directly as representative request/response examples rather than rewriting their bytes:
 
@@ -83,13 +83,13 @@ Use fixture JSON objects directly as representative request/response examples ra
 | --- | --- | --- |
 | Dispatch and reconciliation | `dispatch.command`, `dispatch.receipt` | Same key/fingerprint returns original accepted receipt; acceptance is not completion. Reserve the returned attempt ID before replying. |
 | Approval | `approval.requested`, `approval.decision`, `approval.receipt` | Foundry event, Cloud decision, Foundry durable CAS receipt; no provider call inside DB transaction |
-| Replacement | `approval.cancel_wait` | Fencing receipt schema still needs clarification; never invent a successful receipt |
+| Replacement | `approval.cancel_wait` | Return the existing Foundry fencing receipt; effective cancellation fences the waiting run and retains `replacing_occurrence_id` |
 | Results | `result.event`, `result.receipt` | Validate full scope, event identity and fingerprint; applied/pending insertion remains pending |
 | Management bridge | `management.{create,update,pause,resume,delete}.request/receipt`, `management.{get,list}.request/response` | Preserve Cloud-owned authority, revision checks, saved semantics, default 50/max 100 pagination and owner/filter-bound opaque cursor |
 
 Routine messages use `foundry-runtime`, not the legacy `foundry-service` producer identity. Retain 60-second command lifetime, 16 KiB UTF-8 prompt/result text, 64 KiB event envelope, ordinary sequence maximum 100000 and reserved terminal sequence 100001. Validate byte counts before storage or dispatch; do not reuse the legacy 16000-character field restriction as the routine limit. Unknown fields and unsupported kinds fail closed. Canonical fingerprints exclude only fingerprint/issued_at/deadline_at and use sorted compact ASCII JSON with finite numbers. Retries refresh transport timestamps as needed without changing semantic identity or stored receipt identity.
 
-Deferred management integration must preserve immediate creation for a complete user request, clarification for missing task/time/timezone, agreement before an Ally suggestion becomes a routine, recurring-only pause/resume, and exact conversational deletion confirmation tied to routine and expected revision. Model arguments cannot confer `cloud-service` authority. CLD-013's published interface must define trusted session context, owner/confirmation validation and replay identity. A pending/ambiguous receipt must not become a saved claim. Do not implement transport, tool registration or adapter scaffolding before that interface exists.
+Deferred management integration must preserve immediate creation for a complete user request, clarification for missing task/time/timezone, agreement before an Ally suggestion becomes a routine, recurring-only pause/resume, and exact conversational deletion confirmation tied to routine and expected revision. Model arguments cannot confer `cloud-service` authority. CLD-013's published interface must define trusted session context, owner/confirmation validation and replay identity. A pending/ambiguous receipt must not become a saved claim. The Foundry command adapters do not grant management authority; they accept only Cloud-authenticated released envelopes.
 
 ### Schema and Data Shapes
 
@@ -151,7 +151,7 @@ Not applicable to Foundry implementation. Cloud/Interface own running, result an
 
 ### Phase 1 - Contract adapters and executable capability checks
 
-Create validators only for exact released fixture shapes without changing normative bytes. Record the wire questions for CLD-013; do not fill them with new fields or adapters. Inspect the pinned Hermes approval/continuation seam for contract-independent runtime groundwork; current local client support is insufficient. Bring the reviewed Class A/Class B probes into this worktree with source provenance and retain setup-blocked outcomes. Establish a barrier-controlled contention reproducer and a real suspension/resume probe.
+Create validators only for exact released fixture shapes without changing normative bytes. Add the three authenticated internal Foundry command adapters using those validators and the existing service seams; do not fill contract gaps with new fields. Inspect the pinned Hermes approval/continuation seam for contract-independent runtime groundwork; current local client support is insufficient. Bring the reviewed Class A/Class B probes into this worktree with source provenance and retain setup-blocked outcomes. Establish a barrier-controlled contention reproducer and a real suspension/resume probe.
 
 Files: new `backend/runtime/routine_contracts.py`, `backend/runtime/tests/test_routines_contract.py`; proposed `runtime/hermes-image/smoke_routine_sessions.py`, `launch_routine_probe.py` and their focused tests. Exit: exact fixture identity passes, unsupported kinds fail safely, capability deficits are demonstrated and implementation seams are recorded. Do not call fake-session evidence Class B.
 
@@ -171,9 +171,9 @@ Enabling requires draining or effectively fencing every old worker/credential an
 
 Files: `backend/config/settings.py`, `models.py`/migration, `services/runtime_releases.py`, `runtime_readiness.py`, `runtime_auth.py`, `routines.py`, `claims.py`, and `runtime/allies_runtime/foundry.py` as needed for release enforcement. Mixed-version tests must show zero routine admission/claims for old or unverified workers and invalidation after generation/epoch changes. Rollback first disables new admission, drains or effectively fences all routine authorities/actions, then retires compatible-worker credentials before starting older workers. Preserve evidence and pending deliveries; unresolved effects block downgrade. Old workers must never coexist with live scoped routine authority.
 
-### Phase 3 - Deferred closed-interface integration
+### Phase 3 - Cloud-owned integration and Foundry transport verification
 
-Entry gate: CLD-013 publishes authoritative closed management transport/context, outcome and cancellation interfaces and resolves the documented fixture/prose gaps. Until then, stop this phase; phases 1, 2 and the contract-independent memory work in phase 4 may proceed. Do not introduce guessed routes, wire fields or placeholder adapters. Keep internal approval/action invariants testable without claiming transport completion.
+Entry gate for Cloud-owned work: CLD-013 publishes authoritative management transport/context and insertion evidence, and resolves any remaining fixture/prose gaps. The Foundry command-adapter slice is no longer deferred: it uses the exact route map above and must be verified with Cloud-side adapter tests. Do not add guessed wire fields or placeholder receipts. Keep the capability gate and Class A/Class B evidence explicit without claiming live enablement.
 
 After that gate, wire durable pause/CAS/expiry/action transitions and exact continuation to the published interfaces. Reuse FND-010 effective-stop semantics if available; otherwise implement only the waiting-action fence required here. Add bounded `expire_routine_approvals` processing to the control plane so expiry works while the tenant sleeps. Extend ordered outbox delivery/reconciliation only for released events, including `routine.result` and `routine.approval_requested`. Management adapters are selected from the published interface at that time. Cloud history insertion remains an external integration requirement; no Foundry append/marker code is included.
 
@@ -310,11 +310,11 @@ The runtime continuation API, final image digest and memory failure locus are in
 | --- | --- | --- |
 | ADV-001 P1 | Accepted; addressed in plan | Keep Lease.attempt OneToOne; append RoutineLeaseAcquisition authorities/receipts, update the same Lease current pointer, preserve Attempt replay fields and reject stale tokens. Require concurrent reacquisition, crash/replay and one-Lease assertions. |
 | ADV-002 | Accepted; addressed in plan | Remove Foundry append/marker mechanism. Foundry emits/reconciles published events; Cloud owns insertion and its integrated proof. |
-| ADV-003 | Accepted; deferred work explicitly gated | Only released fixture validators and contract-independent groundwork proceed. Management adapters/transport and missing outcome/cancel/insertion shapes wait for CLD-013 authoritative publication. |
+| ADV-003 | Accepted; manager integration priority supersedes the transport deferral | The three Foundry command adapters now proceed against the released rev9 envelopes and existing service receipts; Cloud management, outcome projection, and main-chat insertion remain Cloud-owned gates. |
 | ADV-004 | Accepted; addressed in plan | Default-disabled admission plus persisted generation/epoch/reviewed-digest enablement; drain/fence old workers, verify current readiness and enforce at admission/claim/reacquisition. Downgrade waits for routine authority drain/fence. |
 | ADV-005 | Accepted; addressed in plan | Require barrier-controlled repeated baseline failure and matched post-fix stress passes with retained counts/budgets. Three runs alone cannot satisfy acceptance. |
 | SIM-001 | Accepted; addressed with ADV-002 | No Foundry history insertion machinery or new insertion wire contract. |
-| SIM-002 | Accepted; addressed with ADV-003 | No speculative management tool transport, adapter scaffold or unpublished outcome/cancel response. |
+| SIM-002 | Accepted; narrowed by the manager integration priority | No speculative management-tool wire shape; expose only the exact rev9 command adapters and existing Foundry cancellation receipt. |
 | SIM-003 | Accepted; addressed in plan | Remove proposed coordinator mode; use production worker seams unless a demonstrated limitation requires reconsideration. |
 
-This plan follows the published revision-9 wire shape, including its `occurrence_disposition` dispatch field, 1/2/3/4 schedule-generation progression, separate required dispatch-receipt identities, and required result `title_snapshot`, without independently editing the normative artifacts or claiming the deferred Cloud integration and Class B release gates. Implementation and validation records for the scoped Foundry groundwork are maintained in `episode-state.md` and the FND-012 handoff.
+This plan follows the published revision-9 wire shape, including its `occurrence_disposition` dispatch field, 1/2/3/4 schedule-generation progression, separate required dispatch-receipt identities, and required result `title_snapshot`, without independently editing the normative artifacts or claiming Cloud insertion or Class B release gates. The Foundry command-adapter route map is an authenticated transport mapping, not a contract change. Implementation and validation records for the scoped Foundry work are maintained in `episode-state.md` and the FND-012 handoff.

@@ -6,6 +6,7 @@ from uuid import UUID, uuid4, uuid5
 
 import pytest
 from django.conf import settings
+from django.test import Client
 from django.utils import timezone as django_timezone
 
 from runtime.exceptions import (
@@ -334,6 +335,193 @@ def approval_decision_payload(state, routine, action, *, decision: str = "approv
     }
     value["fingerprint"] = routine_fingerprint(value)
     return value
+
+
+def cancel_wait_payload(state, routine, action) -> dict:
+    base = state["base"] + timedelta(minutes=11)
+    value = {
+        "schema_version": "v1",
+        "kind": "routine.cancel_wait",
+        "producer": "cloud",
+        "service_identity": "cloud-service",
+        "command_id": str(uuid4()),
+        "idempotency_key": str(uuid4()),
+        "approval_request_id": str(action.approval_request_id),
+        "run_id": str(routine.run_id),
+        "attempt_id": str(routine.current_attempt_id),
+        "generation": routine.generation,
+        "reason": "replacement",
+        "replacing_occurrence_id": str(uuid4()),
+        "scope": {
+            "kind": "workspace",
+            "workspace_id": str(state["workspace"].id),
+            "owner_user_id": str(state["owner_id"]),
+            "ally_id": str(state["ally_id"]),
+            "cloud_binding_id": str(state["cloud_binding_id"]),
+        },
+        "issued_at": base.isoformat().replace("+00:00", "Z"),
+        "deadline_at": (base + timedelta(seconds=60)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "fingerprint": "",
+    }
+    value["fingerprint"] = routine_fingerprint(value)
+    return value
+
+
+def post_internal_routine(path, payload, *, token="test-cloud-service-token"):
+    headers = {"Authorization": f"Bearer {token}"} if token is not None else {}
+    return Client().post(
+        path,
+        data=json.dumps(payload),
+        content_type="application/json",
+        headers=headers,
+    )
+
+
+@pytest.mark.parametrize("token", [None, "wrong-cloud-service-token"])
+def test_routine_dispatch_endpoint_requires_cloud_service_auth(
+    routine_context, settings, token
+):
+    settings.ALLIES_CLOUD_SERVICE_TOKEN = "test-cloud-service-token"
+    response = post_internal_routine(
+        "/api/v1/internal/routines/dispatch",
+        dispatch_payload(routine_context),
+        token=token,
+    )
+
+    assert response.status_code in (401, 403)
+    assert not Execution.objects.filter(source_kind="routine_dispatch").exists()
+
+
+def test_routine_dispatch_endpoint_replays_the_stored_rev9_receipt(
+    routine_context, settings
+):
+    settings.ALLIES_CLOUD_SERVICE_TOKEN = "test-cloud-service-token"
+    payload = dispatch_payload(routine_context)
+
+    first = post_internal_routine("/api/v1/internal/routines/dispatch", payload)
+    replay = post_internal_routine("/api/v1/internal/routines/dispatch", payload)
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert first.json() == replay.json()
+    assert first.json()["kind"] == "routine.dispatch_receipt"
+    assert first.json()["acceptance_is_completion"] is False
+    assert set(first.json()) >= {
+        "execution_id",
+        "attempt_id",
+        "generation",
+    }
+    assert (
+        Execution.objects.filter(source_kind="routine_dispatch").count() == 1
+    )
+
+
+def test_routine_dispatch_endpoint_rejects_a_different_routine_kind(
+    routine_context, settings
+):
+    settings.ALLIES_CLOUD_SERVICE_TOKEN = "test-cloud-service-token"
+    payload = dispatch_payload(routine_context)
+    payload["kind"] = "routine.approval_decision"
+
+    response = post_internal_routine("/api/v1/internal/routines/dispatch", payload)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "INVALID_REQUEST",
+        "message": "request is invalid",
+    }
+
+
+def test_routine_approval_endpoint_replays_and_fences_changed_idempotency(
+    routine_context, settings
+):
+    settings.ALLIES_CLOUD_SERVICE_TOKEN = "test-cloud-service-token"
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+    request_routine_approval(
+        routine.id,
+        action_attempt_id=uuid4(),
+        approval_request_id=uuid4(),
+        action_digest="a" * 64,
+        provider_idempotency_key="provider-api-approval",
+        continuation={"tool": "example"},
+        event_sequence=1,
+        now=state["base"],
+    )
+    action = RoutineApprovalAction.objects.get(routine_execution=routine)
+    payload = approval_decision_payload(state, routine, action)
+
+    first = post_internal_routine(
+        "/api/v1/internal/routines/approval-decision", payload
+    )
+    replay = post_internal_routine(
+        "/api/v1/internal/routines/approval-decision", payload
+    )
+    changed = dict(payload)
+    changed["decision"] = "reject"
+    changed["fingerprint"] = routine_fingerprint(changed)
+    conflict = post_internal_routine(
+        "/api/v1/internal/routines/approval-decision", changed
+    )
+
+    assert first.status_code == 200
+    assert first.json()["result_code"] == "APPROVAL_AUTHORIZED"
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_routine_cancel_wait_endpoint_returns_the_existing_fence_receipt(
+    routine_context, settings
+):
+    settings.ALLIES_CLOUD_SERVICE_TOKEN = "test-cloud-service-token"
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+    request_routine_approval(
+        routine.id,
+        action_attempt_id=uuid4(),
+        approval_request_id=uuid4(),
+        action_digest="b" * 64,
+        provider_idempotency_key="provider-api-cancel",
+        continuation={"tool": "example"},
+        event_sequence=1,
+        now=state["base"],
+    )
+    action = RoutineApprovalAction.objects.get(routine_execution=routine)
+
+    payload = cancel_wait_payload(state, routine, action)
+    response = post_internal_routine(
+        "/api/v1/internal/routines/cancel-wait",
+        payload,
+    )
+    replay = post_internal_routine(
+        "/api/v1/internal/routines/cancel-wait",
+        payload,
+    )
+    changed = dict(payload)
+    changed["reason"] = "replacement-again"
+    changed["fingerprint"] = routine_fingerprint(changed)
+    conflict = post_internal_routine(
+        "/api/v1/internal/routines/cancel-wait",
+        changed,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["code"] == "WAIT_CANCELLED"
+    assert response.json()["status"] == "cancelled"
+    assert replay.status_code == 200
+    assert replay.json() == response.json()
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "IDEMPOTENCY_CONFLICT"
+    routine.refresh_from_db()
+    assert routine.status == RoutineRunStatus.CANCELLED
 
 
 def test_same_profile_routines_have_distinct_leases_and_sessions(routine_context):
