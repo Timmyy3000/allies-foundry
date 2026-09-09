@@ -789,41 +789,53 @@ def run_probe(
                 )
             else:
                 report["readiness"] = "passed"
-                probe = _run(
-                    runner,
-                    _probe_command(container_name, probe_timeout_seconds),
-                    probe_timeout_seconds + 5,
-                )
-                payload = None
-                for line in reversed((probe.stdout or "").splitlines()):
-                    try:
-                        candidate = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(candidate, dict):
-                        payload = candidate
-                        break
-                checks = _validated_probe_report(payload, probe.returncode)
-                if checks is None:
+                try:
+                    probe = _run(
+                        runner,
+                        _probe_command(container_name, probe_timeout_seconds),
+                        probe_timeout_seconds + 5,
+                    )
+                except subprocess.TimeoutExpired:
                     report.update(
                         status="SETUP_BLOCKED",
                         model_preflight="failed",
-                        reason="class_b_evidence_incomplete",
+                        reason="probe_timeout",
                     )
                 else:
-                    capability_status = payload["status"]
-                    report["model_preflight"] = (
-                        "passed" if checks.get("model_preflight") == "pass" else "failed"
-                    )
-                    if capability_status in {"CAPABILITY_PASSED", "CAPABILITY_FAILED"}:
-                        report["capability"] = (
+                    payload = None
+                    for line in reversed((probe.stdout or "").splitlines()):
+                        try:
+                            candidate = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(candidate, dict):
+                            payload = candidate
+                            break
+                    checks = _validated_probe_report(payload, probe.returncode)
+                    if checks is None:
+                        report.update(
+                            status="SETUP_BLOCKED",
+                            model_preflight="failed",
+                            reason="class_b_evidence_incomplete",
+                        )
+                    else:
+                        capability_status = payload["status"]
+                        report["model_preflight"] = (
                             "passed"
-                            if capability_status == "CAPABILITY_PASSED"
+                            if checks.get("model_preflight") == "pass"
                             else "failed"
                         )
-                        report["status"] = capability_status
-                    else:
-                        report.update(status="SETUP_BLOCKED", reason="probe_setup_blocked")
+                        if capability_status in {"CAPABILITY_PASSED", "CAPABILITY_FAILED"}:
+                            report["capability"] = (
+                                "passed"
+                                if capability_status == "CAPABILITY_PASSED"
+                                else "failed"
+                            )
+                            report["status"] = capability_status
+                        else:
+                            report.update(
+                                status="SETUP_BLOCKED", reason="probe_setup_blocked"
+                            )
             report["cleanup"] = (
                 "passed"
                 if _cleanup(

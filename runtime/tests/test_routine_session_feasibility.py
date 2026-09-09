@@ -448,6 +448,33 @@ def test_run_probe_gates_probe_on_readiness(monkeypatch, tmp_path):
     )
 
 
+def test_run_probe_preserves_setup_after_probe_timeout(monkeypatch, tmp_path):
+    calls = []
+    runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(LAUNCH, "_wait_for_readiness", lambda *args: True)
+
+    def timeout_probe_runner(command, **kwargs):
+        calls.append(command)
+        if command[1:2] == ["exec"]:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return runner(command, **kwargs)
+
+    report = LAUNCH.run_probe(
+        image="allies/hermes@sha256:" + "9" * 64,
+        credential_ref="vault://cld012/hermes",
+        model_profile_ref="vault://cld012/model",
+        setup_timeout_seconds=1,
+        probe_timeout_seconds=1,
+        runner=timeout_probe_runner,
+    )
+
+    assert report["setup"] == "passed"
+    assert report["readiness"] == "passed"
+    assert report["model_preflight"] == "failed"
+    assert report["status"] == "SETUP_BLOCKED"
+    assert report["reason"] == "probe_timeout"
+
+
 @pytest.mark.parametrize(
     ("timed_out_command", "cleanup_command"),
     [
