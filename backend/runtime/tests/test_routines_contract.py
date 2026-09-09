@@ -69,10 +69,10 @@ def test_routines_v1_artifacts_match_cloud_owned_lock():
     assert lock == {
         "contract_name": "routines",
         "schema_version": "v1",
-        "content_revision": 13,
+        "content_revision": 14,
         "normative_owner": "cloud",
-        "content_sha256": "63215a54e80dd638167b6b579b55d41c77230525c5b9a0f944a58bef377cbb4e",
-        "fixture_sha256": "8a2ce0b008fd8e681fe08c1b494a5ebf1b2477991611b18360e1a2460f7472ef",
+        "content_sha256": "f05ab0a1baf63551f426c288f0144484c813b5cda535bf1cf5d614fb7a22ea84",
+        "fixture_sha256": "2660d30ee73e8f3cebf94340ea1169019e3c937fd01a30bff6d0e16ecd54ab35",
         "hash_algorithm": "sha256",
         "hash_encoding": "utf-8-no-bom-lf-final-newline",
         "future_enforcement_owners": ["CLD-013", "FND-012", "integration"],
@@ -371,7 +371,7 @@ def test_routines_v1_message_examples_have_complete_directional_envelopes():
         assert message["producer"] in {"cloud", "foundry"}
         assert message["service_identity"] == {
             "cloud": "cloud-service",
-            "foundry": "foundry-runtime",
+            "foundry": "foundry-service",
         }[message["producer"]]
         assert fingerprint_pattern.fullmatch(message["fingerprint"])
         projection = {key: value for key, value in message.items() if key not in ignored}

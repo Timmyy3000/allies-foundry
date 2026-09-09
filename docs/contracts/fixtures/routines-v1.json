@@ -2,7 +2,7 @@
   "contract": {
     "contract_name": "routines",
     "schema_version": "v1",
-    "content_revision": 13,
+    "content_revision": 14,
     "normative_owner": "cloud",
     "compatibility_vendor": "foundry",
     "document_path": "docs/contracts/routines-v1.md",
@@ -687,7 +687,7 @@
       "schema_version": "v1",
       "kind": "routine.dispatch_receipt",
       "producer": "foundry",
-      "service_identity": "foundry-runtime",
+      "service_identity": "foundry-service",
       "command_id": "00000000-0000-4000-8000-00000000001e",
       "idempotency_key": "00000000-0000-4000-8000-00000000001f",
       "outcome": "accepted",
@@ -706,7 +706,7 @@
       },
       "issued_at": "2026-09-11T08:00:02Z",
       "deadline_at": "2026-09-11T08:01:02Z",
-      "fingerprint": "canonical-json-sha256:v1:c2a8dc0ad03beb62e1003a4e3a8af87395f75244ee6064daf871b851c22c2bb2"
+      "fingerprint": "canonical-json-sha256:v1:4be5c9889cdca4547fb289df58fb29f03b12a0b303a70613ad5c6f77e2266284"
     }
   },
   "result": {
@@ -714,7 +714,7 @@
       "schema_version": "v1",
       "kind": "routine.result",
       "producer": "foundry",
-      "service_identity": "foundry-runtime",
+      "service_identity": "foundry-service",
       "event_id": "00000000-0000-4000-8000-00000000001d",
       "event_sequence": 3,
       "routine_id": "00000000-0000-4000-8000-000000000004",
@@ -742,7 +742,7 @@
         "ally_id": "00000000-0000-4000-8000-000000000003",
         "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
       },
-      "fingerprint": "canonical-json-sha256:v1:72f21139e340a0fc141dbe9cf52a1360faaf537f6e23f770b1b9437f55b3c898"
+      "fingerprint": "canonical-json-sha256:v1:dfffed448702283fef237e6affa9de74a4dc6dc088c7f3a395023e95c98efd37"
     },
     "receipt": {
       "schema_version": "v1",
@@ -773,7 +773,7 @@
       "schema_version": "v1",
       "kind": "routine.approval_requested",
       "producer": "foundry",
-      "service_identity": "foundry-runtime",
+      "service_identity": "foundry-service",
       "event_id": "00000000-0000-4000-8000-000000000024",
       "event_sequence": 2,
       "approval_request_id": "00000000-0000-4000-8000-00000000000c",
@@ -796,7 +796,7 @@
       },
       "issued_at": "2026-09-11T08:03:00Z",
       "deadline_at": "2026-09-11T08:04:00Z",
-      "fingerprint": "canonical-json-sha256:v1:7c7a519a96396e5e135e09bdeaa92ca708dc16c53af7fc1a6244c1b00f26eb98"
+      "fingerprint": "canonical-json-sha256:v1:29c5c627cdc49a9e647bae066e6d3d992ad191452fa7726565ba8ba43e416589"
     },
     "decision": {
       "schema_version": "v1",
@@ -827,7 +827,7 @@
       "schema_version": "v1",
       "kind": "routine.approval_receipt",
       "producer": "foundry",
-      "service_identity": "foundry-runtime",
+      "service_identity": "foundry-service",
       "command_id": "00000000-0000-4000-8000-000000000020",
       "idempotency_key": "00000000-0000-4000-8000-000000000021",
       "result_code": "APPROVAL_AUTHORIZED",
@@ -844,7 +844,7 @@
       },
       "issued_at": "2026-09-11T08:04:01Z",
       "deadline_at": "2026-09-11T08:05:01Z",
-      "fingerprint": "canonical-json-sha256:v1:ac07067a89875bd91d63f9c27849cb1aa2f1f33d40170b41c40f4e93c08448fd"
+      "fingerprint": "canonical-json-sha256:v1:caa37f02198926e0ce239a69493d8be6ccbc094bd3f9d471be8c663974dbd579"
     },
     "cancel_wait": {
       "schema_version": "v1",
