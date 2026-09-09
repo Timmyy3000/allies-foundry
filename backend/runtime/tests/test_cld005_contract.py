@@ -18,6 +18,7 @@ from runtime.contracts import (
     MAX_RUNTIME_EVENT_SEQUENCE,
     MAX_TERMINAL_SEQUENCE,
     ExecutionCommand,
+    ExecutionInput,
     FoundryEventEnvelope,
     _validate_event_payload,
     build_event_envelope,
@@ -266,6 +267,52 @@ def test_file_input_contract_keeps_legacy_bytes_and_survives_claim(binding, cont
     )
     assert claim is not None
     assert claim.payload["files"] == file_input["files"]
+
+
+def _file_input(size: int, suffix: str) -> dict:
+    return {
+        "file_id": f"550e8400-e29b-41d4-a716-4466554400{suffix}",
+        "name": f"report-{suffix}.pdf",
+        "media_type": "application/pdf",
+        "size": size,
+        "sha256": "a" * 64,
+    }
+
+
+def test_file_input_rejects_explicit_null_empty_and_oversized_manifests():
+    omitted = ExecutionInput.model_validate(
+        {"kind": "execution_input", "text": "normalized user text"}
+    )
+    assert "files" not in omitted.model_fields_set
+    with pytest.raises(ValueError, match="files must be omitted"):
+        ExecutionInput.model_validate(
+            {"kind": "execution_input", "text": "normalized user text", "files": None}
+        )
+    with pytest.raises(ValueError):
+        ExecutionInput.model_validate(
+            {"kind": "execution_input", "text": "normalized user text", "files": []}
+        )
+
+    accepted = ExecutionInput.model_validate(
+        {
+            "kind": "execution_input",
+            "text": "",
+            "files": [_file_input(25_000_000, "01"), _file_input(25_000_000, "02")],
+        }
+    )
+    assert sum(file.size for file in accepted.files or []) == 50_000_000
+    with pytest.raises(ValueError, match="aggregate size"):
+        ExecutionInput.model_validate(
+            {
+                "kind": "execution_input",
+                "text": "",
+                "files": [
+                    _file_input(25_000_000, "01"),
+                    _file_input(25_000_000, "02"),
+                    _file_input(1, "03"),
+                ],
+            }
+        )
 
 
 def test_bootstrap_is_persisted_and_claimed_as_an_immutable_payload(binding, contract):

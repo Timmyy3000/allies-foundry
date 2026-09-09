@@ -106,6 +106,10 @@ class ExecutionInput(ContractModel):
 
     @model_validator(mode="after")
     def requires_text_or_files(self) -> ExecutionInput:
+        if "files" in self.model_fields_set and self.files is None:
+            raise ValueError("files must be omitted or a nonempty manifest")
+        if self.files and sum(file.size for file in self.files) > 50_000_000:
+            raise ValueError("file manifest exceeds the aggregate size limit")
         if not self.text and not self.files:
             raise ValueError("execution input requires text or files")
         return self
@@ -299,6 +303,13 @@ def validate_command(command: ExecutionCommand) -> ExecutionCommand:
     if command.fingerprint != expected:
         raise RuntimeValidationError("command fingerprint does not match its envelope")
     _validate_utf8_size(command.payload.text, MAX_COMMAND_TEXT_BYTES, "command text")
+    if "files" in command.payload.model_fields_set and command.payload.files is None:
+        raise RuntimeValidationError("files must be omitted or a nonempty manifest")
+    if (
+        command.payload.files
+        and sum(file.size for file in command.payload.files) > 50_000_000
+    ):
+        raise RuntimeValidationError("file manifest exceeds the aggregate size limit")
     if not command.payload.text and not command.payload.files:
         raise RuntimeValidationError("execution input requires text or files")
     bootstrap = command.payload.bootstrap
