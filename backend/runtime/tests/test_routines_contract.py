@@ -69,10 +69,10 @@ def test_routines_v1_artifacts_match_cloud_owned_lock():
     assert lock == {
         "contract_name": "routines",
         "schema_version": "v1",
-        "content_revision": 8,
+        "content_revision": 9,
         "normative_owner": "cloud",
-        "content_sha256": "9e355d7b8ead4d675cd79fef766faa634069117acb0e9927ad02efd8fe202cdc",
-        "fixture_sha256": "70028e3e1935fc79b4d6bd4127facb4501c0a97492a808345921f423ec55cec8",
+        "content_sha256": "891a9eb9932be9e7826baaf313ded7c6fd4f8526a661e0be5a83b6118fee76de",
+        "fixture_sha256": "259577de2ea7e8343b266995767496d359aef196f1a19d6841e67ef133fb3343",
         "hash_algorithm": "sha256",
         "hash_encoding": "utf-8-no-bom-lf-final-newline",
         "future_enforcement_owners": ["CLD-013", "FND-012", "integration"],
@@ -140,10 +140,12 @@ def test_routines_v1_fixture_covers_shapes_and_future_owner_metadata():
             "requirement",
             "preconditions",
             "actions",
-            "expected_result_code",
             "expected_postcondition",
             "enforcing_owner",
         } <= set(case)
+        assert len(
+            {"expected_result_code", "expected_constraint_outcome"} & set(case)
+        ) == 1
         if "input" in case:
             assert isinstance(case["input"], str) and case["input"]
         assert case["enforcing_owner"] in allowed_owners
@@ -214,6 +216,12 @@ def test_routines_v1_management_cases_match_durable_receipts_and_separate_stale_
         == fixture["management"]["update"]["receipt"]["revision"]
     )
     assert fixture["management"]["pause"]["receipt"]["schedule_state"] == "paused"
+    assert fixture["management"]["create"]["receipt"]["schedule_generation"] == 1
+    assert fixture["management"]["update"]["receipt"]["schedule_generation"] == 2
+    assert fixture["management"]["pause"]["receipt"]["schedule_generation"] == 3
+    assert fixture["management"]["resume"]["receipt"]["schedule_generation"] == 4
+    assert fixture["schedule"]["resume"]["schedule_generation"] == 4
+    assert fixture["dispatch"]["command"]["schedule_generation"] == 4
     assert (
         fixture["management"]["resume"]["request"]["expected_revision"]
         == fixture["management"]["pause"]["receipt"]["revision"]
@@ -223,6 +231,30 @@ def test_routines_v1_management_cases_match_durable_receipts_and_separate_stale_
         fixture["management"]["resume"]["receipt"]["next_run_at"]
         > fixture["management"]["resume"]["receipt"]["resume_effective_at"]
     )
+
+    constraint_cases = {
+        case["case_id"]: case
+        for case in fixture["cases"]
+        if case["case_id"].startswith("constraint-")
+    }
+    assert {
+        case["case_id"]: case["expected_constraint_outcome"]
+        for case in constraint_cases.values()
+    } == {
+        "constraint-binding": "BINDING_PROFILE_CONFLICT",
+        "constraint-lease": "PROFILE_LEASE_ACTIVE",
+        "constraint-claim": "CLAIM_SKIPPED_PROFILE_LEASE",
+    }
+
+    correlation = fixture["correlation"]
+    assert set(correlation["required_dispatch"]).isdisjoint(
+        {"execution_id", "attempt_id", "generation"}
+    )
+    assert correlation["required_dispatch_receipt"] == [
+        "execution_id",
+        "attempt_id",
+        "generation",
+    ]
 
     stale = next(case for case in fixture["cases"] if case["case_id"] == "revision-stale")
     assert stale["expected_result_code"] == "REVISION_CONFLICT"

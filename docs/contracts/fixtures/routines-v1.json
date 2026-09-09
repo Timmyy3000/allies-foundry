@@ -2,7 +2,7 @@
   "contract": {
     "contract_name": "routines",
     "schema_version": "v1",
-    "content_revision": 8,
+    "content_revision": 9,
     "normative_owner": "cloud",
     "compatibility_vendor": "foundry",
     "document_path": "docs/contracts/routines-v1.md",
@@ -93,6 +93,7 @@
         "operation": "create",
         "routine_id": "00000000-0000-4000-8000-000000000004",
         "revision": 1,
+        "schedule_generation": 1,
         "schedule_state": "active",
         "next_run_at": "2026-09-11T07:00:00Z",
         "scope": {
@@ -104,7 +105,7 @@
         },
         "issued_at": "2026-09-10T07:00:01Z",
         "deadline_at": "2026-09-10T07:01:01Z",
-        "fingerprint": "canonical-json-sha256:v1:757b8356e311da773fb9185c0fe5f6de2be18a2527dcff0ac51c253a5cd6cd0e"
+        "fingerprint": "canonical-json-sha256:v1:27078114cf70320b3879d3e335e509062ec7288addd5932112a68525bd2ab317"
       }
     },
     "update": {
@@ -151,6 +152,7 @@
         "operation": "update",
         "routine_id": "00000000-0000-4000-8000-000000000004",
         "revision": 2,
+        "schedule_generation": 2,
         "schedule_state": "active",
         "next_run_at": "2026-09-11T08:00:00Z",
         "scope": {
@@ -162,7 +164,7 @@
         },
         "issued_at": "2026-09-10T07:10:01Z",
         "deadline_at": "2026-09-10T07:11:01Z",
-        "fingerprint": "canonical-json-sha256:v1:643602ec2eeead3eaf4b7e10b02252531171449fe77037f9ae2f0c80043fc545"
+        "fingerprint": "canonical-json-sha256:v1:a36f9c8e23003d8101f357df238fe24d0f8ac400c7201c74bcf9a9effd04ccac"
       }
     },
     "pause": {
@@ -199,6 +201,7 @@
         "operation": "pause",
         "routine_id": "00000000-0000-4000-8000-000000000004",
         "revision": 3,
+        "schedule_generation": 3,
         "schedule_state": "paused",
         "next_run_at": null,
         "scope": {
@@ -210,7 +213,7 @@
         },
         "issued_at": "2026-09-10T07:20:01Z",
         "deadline_at": "2026-09-10T07:21:01Z",
-        "fingerprint": "canonical-json-sha256:v1:e899e5e5cbd9f62bf1adddb89b5eee25a9bcf79b2dae9385697821bf365ba8ef"
+        "fingerprint": "canonical-json-sha256:v1:d506eb1ca78267661ad53b434469a633caa9e8f6c857881ca0d766ecee4c9903"
       }
     },
     "resume": {
@@ -247,7 +250,7 @@
         "result_code": "ROUTINE_RESUMED",
         "routine_id": "00000000-0000-4000-8000-000000000004",
         "revision": 4,
-        "schedule_generation": 2,
+        "schedule_generation": 4,
         "schedule_state": "active",
         "resume_effective_at": "2026-09-10T07:30:00Z",
         "next_run_at": "2026-09-11T08:00:00Z",
@@ -260,7 +263,7 @@
         },
         "issued_at": "2026-09-10T07:30:01Z",
         "deadline_at": "2026-09-10T07:31:01Z",
-        "fingerprint": "canonical-json-sha256:v1:636e1bba06a7c0e240cde50221262928ab4e8f6fb878b3018ae799ee76a1a7eb"
+        "fingerprint": "canonical-json-sha256:v1:27b93268c20e3906af26294f99d1adc7a0d5d6cbc4e85dbc657a08ce384bf49b"
       }
     },
     "delete": {
@@ -621,7 +624,7 @@
       "resume_effective_at": "2026-09-10T07:30:00Z",
       "next_run_at": "2026-09-11T08:00:00Z",
       "strictly_greater_than_resume_boundary": true,
-      "schedule_generation": 2
+      "schedule_generation": 4
     }
   },
   "discovery": {
@@ -651,7 +654,7 @@
       "idempotency_key": "00000000-0000-4000-8000-00000000001f",
       "routine_id": "00000000-0000-4000-8000-000000000004",
       "routine_revision": 4,
-      "schedule_generation": 2,
+      "schedule_generation": 4,
       "occurrence_id": "00000000-0000-4000-8000-000000000005",
       "run_id": "00000000-0000-4000-8000-000000000006",
       "scheduled_at": "2026-09-11T08:00:00Z",
@@ -671,7 +674,7 @@
       },
       "issued_at": "2026-09-11T08:00:01Z",
       "deadline_at": "2026-09-11T08:01:01Z",
-      "fingerprint": "canonical-json-sha256:v1:55f2818da291acdd1e0fd9eba4fb000f3a1be75facd502f99077649e2add96d8"
+      "fingerprint": "canonical-json-sha256:v1:24b8865729dce5ed65dfca8f6394fbd5708d0d4e157c2ae0333106493c52d210"
     },
     "receipt": {
       "schema_version": "v1",
@@ -906,11 +909,9 @@
       "occurrence_id",
       "run_id",
       "main_conversation_id",
-      "run_conversation_id",
-      "execution_id",
-      "attempt_id",
-      "generation"
+      "run_conversation_id"
     ],
+    "required_dispatch_receipt": ["execution_id", "attempt_id", "generation"],
     "required_event": ["event_id", "event_sequence", "attempt_id", "generation"],
     "inequalities": [
       ["main_conversation_id", "!=", "run_conversation_id"],
@@ -929,7 +930,7 @@
   },
   "revision": {
     "management": "expected_revision_required_for_mutation",
-    "schedule": "schedule_generation_increments_on_schedule_timezone_pause_resume",
+    "schedule": "starts_at_one_and_increments_once_on_schedule_timezone_pause_resume",
     "admission": "observed_revision_and_schedule_generation_must_match",
     "foundry": "stale_generation_cannot_resume_or_project",
     "zero_write_stale": true
@@ -1000,9 +1001,9 @@
     {"case_id": "revision-stale", "requirement": "stale management mutation", "input": "revision.management", "preconditions": ["expected revision old; current revision newer"], "actions": ["CAS mutation"], "expected_result_code": "REVISION_CONFLICT", "expected_postcondition": "zero-write rejection with no saved management receipt", "enforcing_owner": "CLD-013"},
     {"case_id": "error-unknown-field", "requirement": "closed shape", "input": "unknown field", "preconditions": ["unsupported field"], "actions": ["validate boundary"], "expected_result_code": "INVALID_INPUT", "expected_postcondition": "request rejected before persistence", "enforcing_owner": "CLD-013"},
     {"case_id": "error-oversize-prompt", "requirement": "no truncation", "input": "execution_prompt", "preconditions": ["UTF-8 body over bound"], "actions": ["validate size"], "expected_result_code": "INVALID_INPUT", "expected_postcondition": "oversized prompt is not saved", "enforcing_owner": "CLD-013"},
-    {"case_id": "constraint-binding", "requirement": "current one-to-one binding evidence", "input": "same profile two conversations", "preconditions": ["existing main binding"], "actions": ["reserve second binding"], "expected_result_code": "BINDING_PROFILE_CONFLICT", "expected_postcondition": "existing protection remains", "enforcing_owner": "FND-012"},
-    {"case_id": "constraint-lease", "requirement": "current profile lease evidence", "input": "two unresolved leases", "preconditions": ["same profile"], "actions": ["create second active lease"], "expected_result_code": "PROFILE_LEASE_ACTIVE", "expected_postcondition": "unique unresolved lease constraint rejects", "enforcing_owner": "FND-012"},
-    {"case_id": "constraint-claim", "requirement": "occupied profile claim evidence", "input": "queued second execution", "preconditions": ["active profile lease"], "actions": ["claim next"], "expected_result_code": "CLAIM_SKIPPED_PROFILE_LEASE", "expected_postcondition": "second execution remains queued", "enforcing_owner": "FND-012"}
+    {"case_id": "constraint-binding", "requirement": "current one-to-one binding evidence", "input": "same profile two conversations", "preconditions": ["existing main binding"], "actions": ["reserve second binding"], "expected_constraint_outcome": "BINDING_PROFILE_CONFLICT", "expected_postcondition": "existing protection remains", "enforcing_owner": "FND-012"},
+    {"case_id": "constraint-lease", "requirement": "current profile lease evidence", "input": "two unresolved leases", "preconditions": ["same profile"], "actions": ["create second active lease"], "expected_constraint_outcome": "PROFILE_LEASE_ACTIVE", "expected_postcondition": "unique unresolved lease constraint rejects", "enforcing_owner": "FND-012"},
+    {"case_id": "constraint-claim", "requirement": "occupied profile claim evidence", "input": "queued second execution", "preconditions": ["active profile lease"], "actions": ["claim next"], "expected_constraint_outcome": "CLAIM_SKIPPED_PROFILE_LEASE", "expected_postcondition": "second execution remains queued", "enforcing_owner": "FND-012"}
   ],
   "canonical_fingerprint_vectors": [
     {

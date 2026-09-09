@@ -11,7 +11,7 @@ The identity tuple is kept in `routines-v1.lock.json` and is:
 ```text
 contract_name=routines
 schema_version=v1
-content_revision=8
+content_revision=9
 content_sha256=<SHA-256 of this exact file>
 fixture_sha256=<SHA-256 of fixtures/routines-v1.json>
 ```
@@ -250,6 +250,11 @@ snapshot, and dispatch outbox intent in one short transaction. No network call
 is made inside that transaction. The accepted receipt means execution was
 accepted, not completed.
 
+Cloud's dispatch command carries the routine, occurrence, revision, and schedule
+generation snapshot. Foundry assigns `execution_id`, `attempt_id`, and
+`generation`; those identities first appear in the dispatch receipt and ordered
+events, not in the Cloud command.
+
 The occurrence gets a fresh run conversation with the same profile identity,
 memory, files, and authorized tools. Main or prior-run transcripts are not
 copied automatically. Edits, pause, and delete affect future admissions and do
@@ -306,7 +311,8 @@ reconciliation retries are bounded.
 
 Every due candidate carries `observed_revision` and
 `observed_schedule_generation`. Cloud increments the generation on schedule or
-timezone changes and effective pause/resume. Admission locks the routine,
+timezone changes and effective pause/resume. A newly created routine starts at
+generation `1`, and each such transition increments it exactly once. Admission locks the routine,
 rechecks both values and state, and returns `STALE_DUE_CANDIDATE` with zero
 write when either changed. Resume stores a database-clock boundary and chooses
 the strictly next future instant; repeated resume is `ROUTINE_ALREADY_ACTIVE`.
