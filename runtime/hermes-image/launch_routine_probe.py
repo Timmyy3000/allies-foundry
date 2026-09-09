@@ -29,7 +29,7 @@ RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-MODEL = os.environ.get("CLD012_MODEL", "gpt-5.6-luna")
+MODEL = "gpt-5.6-luna"
 SOURCE_COMMIT = "36cb5ae5530a75def7df3195e49b7a4aa2add482"
 MAX_TIMEOUT_SECONDS = 60.0
 IMAGE_DIGEST = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$", re.IGNORECASE)
@@ -282,9 +282,8 @@ class CredentialSocketProxy:
                             ):
                                 request.clear()
                             break
-                    request_bytes = bytes(request)
-                    if request_bytes and request_bytes in self._allowed_requests:
-                        response = self._resolve(request_bytes)
+                    if request and request in self._allowed_requests:
+                        response = self._resolve(bytes(request))
                         if response:
                             client.sendall(response)
                 except (OSError, TimeoutError):
@@ -345,8 +344,6 @@ def build_run_command(
         "HERMES_CREDENTIAL_SOCKET=/run/allies-runtime/hermes-credential.sock",
         "--env",
         "HERMES_ORIGIN=http://127.0.0.1:8642",
-        "--env",
-        f"CLD012_MODEL={MODEL}",
         "--env",
         f"CLD012_HERMES_PROFILE_ID={profile_id}",
         image,

@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-MODEL = os.environ.get("CLD012_MODEL", "gpt-5.6-luna")
+MODEL = "gpt-5.6-luna"
 MAX_TIMEOUT_SECONDS = 60.0
 SERVER_OBSERVABLE_BARRIER_PREREQUISITE = "server_observable_barrier_events_required"
 MAIN_CONVERSATION = "cld012-main-conversation"
