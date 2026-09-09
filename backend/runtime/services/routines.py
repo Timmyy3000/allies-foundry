@@ -285,6 +285,8 @@ def _decide_routine_approval_once(
     if stored is not None:
         _ensure_command_replay(stored, command)
         return RoutineApprovalReceipt.model_validate(stored.response)
+    if RoutineCommandReceipt.objects.filter(command_id=command.command_id).exists():
+        raise RuntimeIdempotencyConflictError("command identity already exists")
     routine = (
         RoutineExecution.objects.select_for_update()
         .select_related("execution", "workspace", "profile")

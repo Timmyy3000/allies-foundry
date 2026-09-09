@@ -52,6 +52,7 @@ from runtime.routine_contracts import (
 from runtime.services.attempts import fail_attempt
 from runtime.services.claims import claim_next_execution
 from runtime.services.leases import acknowledge_stopped
+from runtime.services.profiles import _fence_profile_leases
 from runtime.services.routines import (
     PROFILE_ID_NAMESPACE,
     accept_routine_dispatch,
@@ -679,6 +680,12 @@ def test_routine_approval_endpoint_replays_and_fences_changed_idempotency(
     replay = post_internal_routine(
         "/api/v1/internal/routines/approval-decision", payload
     )
+    command_collision = dict(payload)
+    command_collision["idempotency_key"] = str(uuid4())
+    command_collision["fingerprint"] = routine_fingerprint(command_collision)
+    collision = post_internal_routine(
+        "/api/v1/internal/routines/approval-decision", command_collision
+    )
     changed = dict(payload)
     changed["decision"] = "reject"
     changed["fingerprint"] = routine_fingerprint(changed)
@@ -690,6 +697,8 @@ def test_routine_approval_endpoint_replays_and_fences_changed_idempotency(
     assert first.json()["result_code"] == "APPROVAL_AUTHORIZED"
     assert replay.status_code == 200
     assert replay.json() == first.json()
+    assert collision.status_code == 409
+    assert collision.json()["code"] == "IDEMPOTENCY_CONFLICT"
     assert conflict.status_code == 409
     assert conflict.json()["code"] == "IDEMPOTENCY_CONFLICT"
 
@@ -786,6 +795,31 @@ def test_routine_cancel_wait_endpoint_returns_the_existing_fence_receipt(
     )
     assert event.payload["outcome"] == "failed"
     assert event.payload["text"] == "Routine wait was cancelled before execution."
+
+
+def test_routine_session_binding_endpoint_accepts_runtime_payload_without_cloud_ref(
+    routine_context,
+):
+    state = routine_context
+    _command, _routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+    issued = issue_runtime_credential(state["workspace"].id, "routine-api-secret")
+
+    response = Client().put(
+        f"/api/v1/runtime/attempts/{claim.attempt_id}/routine-session-binding",
+        data=json.dumps(
+            {"expected_session_id": None, "effective_session_id": "routine-api"}
+        ),
+        content_type="application/json",
+        headers={
+            "Authorization": f"Bearer {issued.raw_token}",
+            "X-Foundry-Lease-Token": claim.lease_token,
+        },
+    )
+
+    assert response.status_code == 200, response.content
+    assert response.json() == {"session_id": "routine-api"}
 
 
 def test_same_profile_routines_have_distinct_leases_and_sessions(routine_context):
@@ -1047,6 +1081,42 @@ def test_expired_routine_lease_reuses_one_lease_with_a_new_acquisition(routine_c
     assert [acquisition.current for acquisition in acquisitions] == [False, True]
     routine.refresh_from_db()
     assert routine.status == RoutineRunStatus.WORKING
+
+
+def test_profile_fencing_terminalizes_active_routine_with_failed_result(
+    routine_context,
+):
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+
+    with transaction.atomic():
+        _fence_profile_leases(state["profile"].id)
+
+    routine = RoutineExecution.objects.get(pk=routine.id)
+    attempt = routine.current_attempt
+    attempt.refresh_from_db()
+    execution = Execution.objects.get(pk=routine.execution_id)
+    lease = Lease.objects.get(pk=claim.lease_id)
+    event = ExecutionEvent.objects.get(
+        attempt_id=attempt.id,
+        event_type="routine.result",
+    )
+
+    assert routine.status == RoutineRunStatus.FAILED
+    assert routine.terminal_receipt["code"] == "PROFILE_FENCED"
+    assert routine.terminal_receipt["result_event_id"] == str(event.event_id)
+    assert attempt.status == AttemptStatus.UNKNOWN
+    assert execution.status == ExecutionStatus.FAILED
+    assert lease.state == LeaseState.FENCED
+    assert event.payload["outcome"] == "failed"
+    assert event.payload["text"] == "Routine profile was fenced before completion."
+
+    _replacement_command, replacement = dispatch(
+        state, ordinal=2, routine_id=routine.routine_id
+    )
+    assert replacement.routine_id == routine.routine_id
 
 
 def test_expired_routine_after_session_bind_is_fenced_not_redispatched(routine_context):

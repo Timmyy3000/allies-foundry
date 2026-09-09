@@ -78,6 +78,7 @@ from .schemas import (
     FailRequest,
     MaterializationReceiptRequest,
     ProfileProvisioningRequest,
+    RoutineSessionBindingRequest,
     RuntimeActivityWaitReceipt,
     RuntimeActivityWaitRequest,
     RuntimeIntentReceipt,
@@ -515,7 +516,7 @@ def register(api: NinjaExtraAPI) -> None:
     def routine_session_binding(
         request: HttpRequest,
         attempt_id,
-        payload: SessionBindingRequest,
+        payload: RoutineSessionBindingRequest,
     ):
         try:
             context = authenticate_runtime_token(_bearer(request))
