@@ -2,7 +2,8 @@
 
 This is test tooling only.  It refuses to invent credentials or a provider,
 uses the existing socket resolver protocol, and reports setup separately from
-real Hermes capability.
+real Hermes capability.  The Class B launcher requires Unix-domain sockets;
+run it on a Unix-like host or through WSL rather than native Windows Python.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ CLASS_B_REQUIRED_CHECKS = frozenset(
         "main_completion_while_routine_active",
     }
 )
+CLASS_B_CAPABILITY_CHECKS = CLASS_B_REQUIRED_CHECKS | {"session_creation"}
 PROBE_CHECK_STATUSES = frozenset({"pass", "fail", "blocked"})
 PROBE_EXIT_STATUSES = {
     0: "CAPABILITY_PASSED",
@@ -436,13 +438,13 @@ def _validated_probe_report(payload: Any, returncode: int | None) -> dict[str, s
             else None
         )
     if status == "CAPABILITY_FAILED":
-        if not CLASS_B_REQUIRED_CHECKS <= checks.keys():
+        if not checks.keys() <= CLASS_B_CAPABILITY_CHECKS:
             return None
-        if (
-            checks["authenticated_readiness"] != "pass"
-            or checks["model_preflight"] != "pass"
-            or all(value == "pass" for value in checks.values())
-        ):
+        if not {"authenticated_readiness", "model_preflight"} <= checks.keys():
+            return None
+        if checks["authenticated_readiness"] != "pass" or checks[
+            "model_preflight"
+        ] != "pass" or all(value == "pass" for value in checks.values()):
             return None
         return checks
     if status == "SETUP_BLOCKED":
@@ -612,20 +614,21 @@ def run_probe(
             )
             runtime_root = RUNTIME_ROOT
             probe_path = Path(__file__).with_name("smoke_routine_sessions.py")
-            container_name = _owned_name("hermes")
-            network_name = _owned_name("network")
+            container_candidate = _owned_name("hermes")
+            network_candidate = _owned_name("network")
             network = _run(
                 runner,
-                build_network_command(network_name),
+                build_network_command(network_candidate),
                 setup_timeout_seconds,
             )
             if not _succeeded(network):
                 raise LaunchBlocked("owned isolated network could not be created")
+            network_name = network_candidate
             run_result = _run(
                 runner,
                 build_run_command(
                     image=image,
-                    container_name=container_name,
+                    container_name=container_candidate,
                     network_name=network_name,
                     data_root=data_root,
                     socket_root=socket_root,
@@ -638,6 +641,7 @@ def run_probe(
             )
             if not _succeeded(run_result):
                 raise LaunchBlocked("inherited /init container did not start")
+            container_name = container_candidate
             report["setup"] = "passed"
             if not _wait_for_readiness(runner, container_name, setup_timeout_seconds):
                 report.update(

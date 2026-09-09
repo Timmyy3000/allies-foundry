@@ -45,6 +45,10 @@ were corrected; the remaining evidence is the intermittent provider behavior.
 
 Exact launcher command:
 
+Run this command on a Unix-like host (Linux/macOS) or in WSL; the launcher
+requires Unix-domain sockets and native Windows Python cannot provide the
+credential-socket bridge.
+
 ```powershell
 uv run --locked --project runtime python runtime/hermes-image/launch_routine_probe.py --image <resolved-local-image-digest> --credential-ref <opaque-reference> --model-profile-ref <authorized-synthetic-profile-reference> --setup-timeout-seconds 60 --probe-timeout-seconds 60
 ```

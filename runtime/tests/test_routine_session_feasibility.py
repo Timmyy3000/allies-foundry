@@ -334,7 +334,7 @@ def test_run_probe_gates_probe_on_readiness(monkeypatch, tmp_path):
     )
 
 
-def test_run_probe_timeout_cleans_partial_resources(monkeypatch, tmp_path):
+def test_run_probe_timeout_does_not_cleanup_uncreated_resources(monkeypatch, tmp_path):
     calls = []
     runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
 
@@ -355,9 +355,9 @@ def test_run_probe_timeout_cleans_partial_resources(monkeypatch, tmp_path):
     )
 
     assert report["status"] == "SETUP_BLOCKED"
-    assert report["cleanup"] == "passed"
-    assert any(command[1:3] == ["rm", "--force"] for command in calls)
-    assert any(command[1:3] == ["network", "rm"] for command in calls)
+    assert report["cleanup"] == "not_needed"
+    assert not any(command[1:3] == ["rm", "--force"] for command in calls)
+    assert not any(command[1:3] == ["network", "rm"] for command in calls)
 
 
 def test_run_probe_reports_cleanup_failure(monkeypatch, tmp_path):
@@ -563,6 +563,49 @@ def test_run_probe_accepts_complete_capability_failed_report_with_exit_one(
         setup_timeout_seconds=1,
         probe_timeout_seconds=1,
         runner=capability_failed_runner,
+    )
+
+    assert report["status"] == "CAPABILITY_FAILED"
+    assert report["model_preflight"] == "passed"
+    assert report["capability"] == "failed"
+
+
+def test_run_probe_accepts_early_capability_failed_report_with_exit_one(
+    monkeypatch, tmp_path
+):
+    calls = []
+    runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(LAUNCH, "_wait_for_readiness", lambda *args: True)
+    image = "allies/hermes@sha256:" + "3" * 64
+
+    def early_capability_failed_runner(command, **kwargs):
+        calls.append(command)
+        if command[1:2] == ["exec"]:
+            return CompletedProcess(
+                command,
+                1,
+                stdout=json.dumps(
+                    {
+                        "mode": "service",
+                        "status": "CAPABILITY_FAILED",
+                        "checks": [
+                            {"name": "authenticated_readiness", "status": "pass"},
+                            {"name": "model_preflight", "status": "pass"},
+                            {"name": "session_creation", "status": "fail"},
+                        ],
+                    }
+                ),
+                stderr="capability failed",
+            )
+        return runner(command, **kwargs)
+
+    report = LAUNCH.run_probe(
+        image=image,
+        credential_ref="vault://cld012/hermes",
+        model_profile_ref="vault://cld012/model",
+        setup_timeout_seconds=1,
+        probe_timeout_seconds=1,
+        runner=early_capability_failed_runner,
     )
 
     assert report["status"] == "CAPABILITY_FAILED"
