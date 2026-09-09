@@ -63,6 +63,9 @@ FIXTURE_PATH = (
     / "contracts"
     / "foundry-execution-v1.json"
 )
+FILE_INPUT_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[3] / "docs" / "contracts" / "file-input-v1.json"
+)
 ACTIVITY_FIXTURE_PATH = (
     Path(__file__).resolve().parents[3]
     / "docs"
@@ -237,6 +240,32 @@ def test_optional_bootstrap_is_fingerprinted_and_legacy_shape_stays_compatible(
     invalid = invalid.model_copy(update={"fingerprint": command_fingerprint(invalid)})
     with pytest.raises(RuntimeValidationError, match="before the second"):
         validate_command(invalid)
+
+
+def test_file_input_contract_keeps_legacy_bytes_and_survives_claim(binding, contract):
+    legacy = ExecutionCommand.model_validate(contract["command"])
+    assert command_fingerprint(legacy) == contract["command"]["fingerprint"]
+    file_input = json.loads(FILE_INPUT_FIXTURE_PATH.read_text(encoding="utf-8"))
+    data = legacy.model_dump(mode="json", exclude_none=True)
+    data["payload"] = file_input
+    with_files = ExecutionCommand.model_validate(data)
+    with_files = with_files.model_copy(
+        update={"fingerprint": command_fingerprint(with_files)}
+    )
+
+    receipt = create_execution_intent(with_files)
+    assert receipt.status == "accepted"
+    execution = Execution.objects.get(command_id=with_files.command_id)
+    assert execution.input_payload["message"] == ""
+    assert execution.input_payload["files"] == file_input["files"]
+
+    workspace, _profile = binding
+    issued = issue_runtime_credential(workspace.id, "runtime-files-token")
+    claim = claim_next_execution(
+        authenticate_runtime_token(issued.raw_token), uuid4(), 1
+    )
+    assert claim is not None
+    assert claim.payload["files"] == file_input["files"]
 
 
 def test_bootstrap_is_persisted_and_claimed_as_an_immutable_payload(binding, contract):

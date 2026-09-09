@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 from runtime.exceptions import RuntimeValidationError
 
@@ -90,10 +90,25 @@ class FirstTurnBootstrap(ContractModel):
     text: StrictStr = Field(..., min_length=1, max_length=MAX_COMMAND_TEXT_BYTES)
 
 
+class FileInputV1(ContractModel):
+    file_id: UUID
+    name: StrictStr = Field(..., min_length=1, max_length=255)
+    media_type: StrictStr = Field(..., min_length=1, max_length=127)
+    size: StrictInt = Field(..., ge=1, le=25_000_000)
+    sha256: StrictStr = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+
 class ExecutionInput(ContractModel):
     kind: Literal["execution_input"]
-    text: StrictStr = Field(..., min_length=1, max_length=16_000)
+    text: StrictStr = Field(..., min_length=0, max_length=MAX_COMMAND_TEXT_BYTES)
     bootstrap: FirstTurnBootstrap | None = None
+    files: list[FileInputV1] | None = Field(default=None, min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def requires_text_or_files(self) -> ExecutionInput:
+        if not self.text and not self.files:
+            raise ValueError("execution input requires text or files")
+        return self
 
 
 class FoundryCorrelation(ContractModel):
@@ -284,6 +299,8 @@ def validate_command(command: ExecutionCommand) -> ExecutionCommand:
     if command.fingerprint != expected:
         raise RuntimeValidationError("command fingerprint does not match its envelope")
     _validate_utf8_size(command.payload.text, MAX_COMMAND_TEXT_BYTES, "command text")
+    if not command.payload.text and not command.payload.files:
+        raise RuntimeValidationError("execution input requires text or files")
     bootstrap = command.payload.bootstrap
     if bootstrap is not None:
         if command.conversation_turn_ordinal < 2:
@@ -703,6 +720,7 @@ __all__ = [
     "CloudCorrelation",
     "EventDeliveryReceipt",
     "ExecutionCommand",
+    "FileInputV1",
     "ExecutionInput",
     "ExecutionReceipt",
     "ExecutionScope",
