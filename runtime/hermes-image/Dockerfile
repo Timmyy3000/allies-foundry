@@ -59,18 +59,21 @@ COPY plugins/memory/allies_mnemosyne/ /opt/hermes/plugins/memory/allies_mnemosyn
 # image without the capability the runtime expects.
 COPY patches/first-turn-transcript-bootstrap.patch /tmp/allies-first-turn-transcript-bootstrap.patch
 RUN cd /opt/hermes \
+    && sed -i 's/\r$//' /tmp/allies-first-turn-transcript-bootstrap.patch \
     && git apply --check --whitespace=nowarn /tmp/allies-first-turn-transcript-bootstrap.patch \
     && git apply --whitespace=nowarn /tmp/allies-first-turn-transcript-bootstrap.patch \
     && rm -f /tmp/allies-first-turn-transcript-bootstrap.patch
 
 COPY patches/meaningful-activity.patch /tmp/allies-meaningful-activity.patch
 RUN cd /opt/hermes \
+    && sed -i 's/\r$//' /tmp/allies-meaningful-activity.patch \
     && git apply --check --whitespace=nowarn /tmp/allies-meaningful-activity.patch \
     && git apply --whitespace=nowarn /tmp/allies-meaningful-activity.patch \
     && rm -f /tmp/allies-meaningful-activity.patch
 
 COPY patches/approval-flow.patch /tmp/allies-approval-flow.patch
 RUN cd /opt/hermes \
+    && sed -i 's/\r$//' /tmp/allies-approval-flow.patch \
     && git apply --check --whitespace=nowarn /tmp/allies-approval-flow.patch \
     && git apply --whitespace=nowarn /tmp/allies-approval-flow.patch \
     && rm -f /tmp/allies-approval-flow.patch
@@ -80,6 +83,7 @@ RUN cd /opt/hermes \
 # in the active profile instead of falling through as unknown tools.
 COPY patches/memory-provider-tool-routing.patch /tmp/allies-memory-provider-tool-routing.patch
 RUN cd /opt/hermes \
+    && sed -i 's/\r$//' /tmp/allies-memory-provider-tool-routing.patch \
     && git apply --check --whitespace=nowarn /tmp/allies-memory-provider-tool-routing.patch \
     && git apply --whitespace=nowarn /tmp/allies-memory-provider-tool-routing.patch \
     && rm -f /tmp/allies-memory-provider-tool-routing.patch
