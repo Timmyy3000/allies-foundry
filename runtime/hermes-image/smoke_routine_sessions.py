@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-MODEL = "gpt-5.6-luna"
+MODEL = os.environ.get("CLD012_MODEL", "gpt-5.6-luna")
 MAX_TIMEOUT_SECONDS = 60.0
 SERVER_OBSERVABLE_BARRIER_PREREQUISITE = "server_observable_barrier_events_required"
 MAIN_CONVERSATION = "cld012-main-conversation"
@@ -134,10 +134,11 @@ def _tool_succeeded(result: dict[str, Any]) -> bool:
 def _recall_succeeded(result: dict[str, Any]) -> bool:
     status = result.get("status")
     return (
-        type(result.get("count")) is int
+        status in SUCCESS_STATUSES
+        and status not in REJECTED_STATUSES
+        and type(result.get("count")) is int
         and result["count"] >= 0
         and isinstance(result.get("results"), list)
-        and status not in REJECTED_STATUSES
     )
 
 

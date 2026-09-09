@@ -114,6 +114,22 @@ def test_image_source_revision_requires_exact_normalized_output(
     )
 
 
+@pytest.mark.parametrize(
+    ("readiness_output", "expected"),
+    [("READY\n", True), ("NOT_READY\n", False)],
+)
+def test_readiness_requires_exact_ready_output(
+    monkeypatch, readiness_output, expected
+):
+    clock = iter((0.0, 0.1, 1.0, 1.0))
+    monkeypatch.setattr(LAUNCH.time, "monotonic", lambda: next(clock))
+
+    def runner(command, **kwargs):
+        return CompletedProcess(command, 0, stdout=readiness_output, stderr="")
+
+    assert LAUNCH._wait_for_readiness(runner, "container", 1.0) is expected
+
+
 def test_launcher_validates_bounded_references_and_redacts_commands(tmp_path):
     upstream = tmp_path / "upstream.sock"
     upstream.touch()
@@ -638,6 +654,26 @@ def test_run_probe_accepts_early_capability_failed_report_with_exit_one(
     assert report["capability"] == "failed"
 
 
+def test_validated_capability_failed_accepts_post_turn_assertions():
+    payload = {
+        "mode": "service",
+        "status": "CAPABILITY_FAILED",
+        "checks": [
+            {"name": "authenticated_readiness", "status": "pass"},
+            {"name": "model_preflight", "status": "pass"},
+            {"name": "real_session_turns", "status": "pass"},
+            {"name": "server_observable_barrier", "status": "pass"},
+            {"name": "main_and_routine_overlap", "status": "pass"},
+            {"name": "main_completion_while_routine_active", "status": "pass"},
+            {"name": "event_identity_attribution", "status": "fail"},
+            {"name": "history_canary_isolation", "status": "pass"},
+            {"name": "memory_file_observations", "status": "pass"},
+        ],
+    }
+
+    assert LAUNCH._validated_probe_report(payload, 1) is not None
+
+
 def test_markers_recalled_matches_each_requested_marker():
     results = [
         {"status": "ok", "count": 2, "results": [{"content": "A B"}]},
@@ -651,6 +687,13 @@ def test_markers_recalled_matches_each_requested_marker():
             {"status": "ok", "count": 1, "results": [{"content": "B"}]},
         ],
         ("A", "B"),
+    )
+
+
+@pytest.mark.parametrize("status", ["tool_error", "memory_unavailable", "error"])
+def test_recall_requires_success_status(status):
+    assert not SMOKE._recall_succeeded(
+        {"status": status, "count": 1, "results": [{"content": "A"}]}
     )
 
 

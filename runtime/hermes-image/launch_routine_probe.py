@@ -29,7 +29,7 @@ RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-MODEL = "gpt-5.6-luna"
+MODEL = os.environ.get("CLD012_MODEL", "gpt-5.6-luna")
 SOURCE_COMMIT = "36cb5ae5530a75def7df3195e49b7a4aa2add482"
 MAX_TIMEOUT_SECONDS = 60.0
 IMAGE_DIGEST = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$", re.IGNORECASE)
@@ -46,7 +46,16 @@ CLASS_B_REQUIRED_CHECKS = frozenset(
         "main_completion_while_routine_active",
     }
 )
-CLASS_B_CAPABILITY_CHECKS = CLASS_B_REQUIRED_CHECKS | {"session_creation"}
+CLASS_B_ASSERTION_CHECKS = frozenset(
+    {
+        "event_identity_attribution",
+        "history_canary_isolation",
+        "memory_file_observations",
+    }
+)
+CLASS_B_CAPABILITY_CHECKS = (
+    CLASS_B_REQUIRED_CHECKS | CLASS_B_ASSERTION_CHECKS | {"session_creation"}
+)
 PROBE_CHECK_STATUSES = frozenset({"pass", "fail", "blocked"})
 PROBE_EXIT_STATUSES = {
     0: "CAPABILITY_PASSED",
@@ -273,8 +282,9 @@ class CredentialSocketProxy:
                             ):
                                 request.clear()
                             break
-                    if request and request in self._allowed_requests:
-                        response = self._resolve(bytes(request))
+                    request_bytes = bytes(request)
+                    if request_bytes and request_bytes in self._allowed_requests:
+                        response = self._resolve(request_bytes)
                         if response:
                             client.sendall(response)
                 except (OSError, TimeoutError):
@@ -335,6 +345,8 @@ def build_run_command(
         "HERMES_CREDENTIAL_SOCKET=/run/allies-runtime/hermes-credential.sock",
         "--env",
         "HERMES_ORIGIN=http://127.0.0.1:8642",
+        "--env",
+        f"CLD012_MODEL={MODEL}",
         "--env",
         f"CLD012_HERMES_PROFILE_ID={profile_id}",
         image,
@@ -509,7 +521,7 @@ def _wait_for_readiness(runner: Runner, container_name: str, timeout: float) -> 
             result = _run(runner, _readiness_command(container_name), remaining)
         except (OSError, subprocess.TimeoutExpired):
             result = None
-        if result is not None and _succeeded(result, "READY"):
+        if result is not None and _succeeded_with_exact_output(result, "READY"):
             return True
     return False
 
