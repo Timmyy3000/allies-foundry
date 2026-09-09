@@ -11,7 +11,7 @@ The identity tuple is kept in `routines-v1.lock.json` and is:
 ```text
 contract_name=routines
 schema_version=v1
-content_revision=10
+content_revision=11
 content_sha256=<SHA-256 of this exact file>
 fixture_sha256=<SHA-256 of fixtures/routines-v1.json>
 ```

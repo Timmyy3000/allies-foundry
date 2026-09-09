@@ -71,7 +71,7 @@ def test_routines_v1_artifacts_match_cloud_owned_lock():
         "schema_version": "v1",
         "content_revision": 11,
         "normative_owner": "cloud",
-        "content_sha256": "d1a75807463cb16c7306acad04569a32502b333d42bbc947feb78cc82d5ec24d",
+        "content_sha256": "a343017252af242563b5a7a127f0b985d6dade73364f3dc1e207060dc15b7a36",
         "fixture_sha256": "3b903d65225dde3aef9a03d0c7feffff21c1b38acba8dd2392b9adf6dc83019d",
         "hash_algorithm": "sha256",
         "hash_encoding": "utf-8-no-bom-lf-final-newline",
@@ -81,6 +81,13 @@ def test_routines_v1_artifacts_match_cloud_owned_lock():
     assert fixture["contract"]["schema_version"] == lock["schema_version"]
     assert fixture["contract"]["content_revision"] == lock["content_revision"]
     assert fixture["contract"]["normative_owner"] == lock["normative_owner"]
+    document_revision = re.search(
+        r"^content_revision=(\d+)$",
+        DOCUMENT_PATH.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert document_revision
+    assert int(document_revision.group(1)) == lock["content_revision"]
     assert _sha256(DOCUMENT_PATH) == lock["content_sha256"]
     assert _sha256(FIXTURE_PATH) == lock["fixture_sha256"]
 
