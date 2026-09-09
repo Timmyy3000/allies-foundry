@@ -23,12 +23,15 @@ canaries, and pre-registers deterministic network, volume, and container names
 so cleanup runs after timeout-after-side-effect outcomes; explicit Docker
 resource-specific absence responses count as verified cleanup, while unrelated
 "not found" errors remain cleanup failures.
+The probe-timeout regression preserves `setup=passed` and `readiness=passed`,
+leaves the undifferentiated model stage `pending`, and emits
+`status=SETUP_BLOCKED` with `reason=probe_timeout`.
 
 ## Verified tuple
 
 - Cloud artifact head: `3af3da24e8f8e516861f34ddaa85442bbe25eaa1`
 - Foundry artifact head: `2626076973cfa52eec00eed265ab045b8b7b9ac5`
-- Foundry final evidence head: `5773205426a39c4627e360834bb1fde536c8f7e0`
+- Foundry final evidence head: `67454d153a6cb5295e5d3aadc93edfaaf35ea2a7`
 - Contract revision: `14`
 - Contract SHA-256: `f05ab0a1baf63551f426c288f0144484c813b5cda535bf1cf5d614fb7a22ea84`
 - Fixture SHA-256: `2660d30ee73e8f3cebf94340ea1169019e3c937fd01a30bff6d0e16ecd54ab35`
@@ -40,12 +43,14 @@ resource-specific absence responses count as verified cleanup, while unrelated
 
 - Cloud contract tests: `7 passed`.
 - Foundry vendor contract tests: `5 passed`.
-- Foundry focused feasibility tests: `39 passed`.
+- Foundry focused feasibility tests: `43 passed` from a clean checkout of the
+  final evidence head.
 - Final-head evidence regressions cover exact readiness output, post-turn
   assertion validation, success-status recall gating, the complete six-direction
   history-canary matrix, and timeout-after-side-effect cleanup for network,
   volume, and container resources, including rejection of unrelated cleanup
-  errors that merely contain "not found".
+  errors that merely contain "not found". They also cover probe-timeout stage
+  attribution.
 - Foundry harness syntax compilation and scoped checks passed.
 - Class A remains `INCONCLUSIVE_REVIEW_REQUIRED`; Class B remains
   `SETUP_BLOCKED`.
