@@ -529,11 +529,28 @@ def _validated_probe_report(payload: Any, returncode: int | None) -> dict[str, s
     checks = _probe_checks(payload)
     if checks is None or not isinstance(payload, dict):
         return None
+    status = payload.get("status")
+    if not isinstance(status, str):
+        return None
     expected_status = PROBE_EXIT_STATUSES.get(returncode)
-    if payload.get("status") != expected_status:
+    early_statuses = {"READINESS_FAILED", "MODEL_PREFLIGHT_FAILED"}
+    if status in early_statuses:
+        if returncode != 1:
+            return None
+    elif status != expected_status:
         return None
 
-    status = payload["status"]
+    if status == "READINESS_FAILED":
+        if checks != {"authenticated_readiness": "fail"}:
+            return None
+        return checks
+    if status == "MODEL_PREFLIGHT_FAILED":
+        if checks != {
+            "authenticated_readiness": "pass",
+            "model_preflight": "fail",
+        }:
+            return None
+        return checks
     if status == "CAPABILITY_PASSED":
         return (
             checks
@@ -837,16 +854,18 @@ def run_probe(
                     if checks is None:
                         report.update(
                             status="SETUP_BLOCKED",
-                            model_preflight="failed",
                             reason="class_b_evidence_incomplete",
                         )
                     else:
                         capability_status = payload["status"]
-                        report["model_preflight"] = (
-                            "passed"
-                            if checks.get("model_preflight") == "pass"
-                            else "failed"
-                        )
+                        if checks.get("authenticated_readiness") == "fail":
+                            report["readiness"] = "failed"
+                        if "model_preflight" in checks:
+                            report["model_preflight"] = (
+                                "passed"
+                                if checks["model_preflight"] == "pass"
+                                else "failed"
+                            )
                         if capability_status in {"CAPABILITY_PASSED", "CAPABILITY_FAILED"}:
                             report["capability"] = (
                                 "passed"

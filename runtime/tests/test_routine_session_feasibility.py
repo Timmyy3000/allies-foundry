@@ -655,7 +655,76 @@ def test_run_probe_requires_service_stage_evidence_before_capability(
     )
 
     assert report["status"] == "SETUP_BLOCKED"
-    assert report["model_preflight"] == "failed"
+    assert report["model_preflight"] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("status", "returncode", "checks", "expected_readiness", "expected_model"),
+    [
+        (
+            "SETUP_BLOCKED",
+            2,
+            [{"name": "profile_bootstrap", "status": "blocked"}],
+            "passed",
+            "pending",
+        ),
+        (
+            "READINESS_FAILED",
+            1,
+            [{"name": "authenticated_readiness", "status": "fail"}],
+            "failed",
+            "pending",
+        ),
+        (
+            "MODEL_PREFLIGHT_FAILED",
+            1,
+            [
+                {"name": "authenticated_readiness", "status": "pass"},
+                {"name": "model_preflight", "status": "fail"},
+            ],
+            "passed",
+            "failed",
+        ),
+    ],
+)
+def test_run_probe_preserves_early_stage_attribution(
+    monkeypatch,
+    tmp_path,
+    status,
+    returncode,
+    checks,
+    expected_readiness,
+    expected_model,
+):
+    calls = []
+    runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(LAUNCH, "_wait_for_readiness", lambda *args: True)
+
+    def early_stage_runner(command, **kwargs):
+        calls.append(command)
+        if command[1:2] == ["exec"]:
+            return CompletedProcess(
+                command,
+                returncode,
+                stdout=json.dumps(
+                    {"mode": "service", "status": status, "checks": checks}
+                ),
+                stderr="probe stage stopped",
+            )
+        return runner(command, **kwargs)
+
+    report = LAUNCH.run_probe(
+        image="allies/hermes@sha256:" + "8" * 64,
+        credential_ref="vault://cld012/hermes",
+        model_profile_ref="vault://cld012/model",
+        setup_timeout_seconds=1,
+        probe_timeout_seconds=1,
+        runner=early_stage_runner,
+    )
+
+    assert report["status"] == "SETUP_BLOCKED"
+    assert report["readiness"] == expected_readiness
+    assert report["model_preflight"] == expected_model
 
 
 def test_run_probe_rejects_client_only_overlap_without_server_barrier(
@@ -743,7 +812,7 @@ def test_run_probe_rejects_duplicate_class_b_check_names(monkeypatch, tmp_path):
     )
 
     assert report["status"] == "SETUP_BLOCKED"
-    assert report["model_preflight"] == "failed"
+    assert report["model_preflight"] == "pending"
 
 
 def test_run_probe_accepts_complete_capability_failed_report_with_exit_one(
