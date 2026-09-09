@@ -31,12 +31,22 @@ def claim(
     conversation_id: str | None = None,
     session_id: str | None = None,
     bootstrap: dict | None = None,
+    routine_id: str | None = None,
+    approval: dict | None = None,
 ):
-    payload = {"message": "hello"}
-    if conversation_id is None:
-        payload["cloud_conversation_ref"] = "cloud-1"
+    if routine_id is None:
+        payload = {"message": "hello"}
+        if conversation_id is None:
+            payload["cloud_conversation_ref"] = "cloud-1"
+    else:
+        payload = {
+            "execution_prompt": "routine hello",
+            "run_conversation_id": "routine-conversation",
+        }
     if bootstrap is not None:
         payload["bootstrap"] = bootstrap
+    if approval is not None:
+        payload["routine_approval"] = approval
     return FoundryClaim(
         attempt_id="attempt-1",
         execution_id="execution-1",
@@ -51,6 +61,7 @@ def claim(
         expires_at=None,
         payload=payload,
         claim_id="claim-1",
+        routine_id=routine_id,
     )
 
 
@@ -62,7 +73,9 @@ class RecordingFoundry:
     def __post_init__(self):
         self.events = []
         self.binds = []
+        self.routine_binds = []
         self.completes = []
+        self.routine_results = []
         self.failures = []
         self.stops = []
 
@@ -79,9 +92,18 @@ class RecordingFoundry:
         self.binds.append(body)
         return SessionReceipt(body["effective_session_id"])
 
+    async def bind_routine(self, attempt_id, lease_token, **body):
+        self.routine_binds.append(body)
+        return SessionReceipt(body["effective_session_id"])
+
     async def complete(self, attempt_id, lease_token, **body):
         self.completes.append(body)
         return TerminalReceipt(attempt_id, "succeeded", "complete-1")
+
+    async def routine_result(self, attempt_id, lease_token, **body):
+        self.routine_results.append(body)
+        status = "failed" if body["outcome"] == "failed" else "succeeded"
+        return TerminalReceipt(attempt_id, status, "routine-result-1")
 
     async def fail(self, attempt_id, lease_token, **body):
         self.failures.append(body)
@@ -193,6 +215,49 @@ async def test_first_turn_dispatches_once_binds_terminal_session_and_completes()
         "run_id": "run-1",
         "status": "completed",
     }
+
+
+@pytest.mark.asyncio
+async def test_routine_claim_uses_run_conversation_and_terminal_result():
+    foundry = RecordingFoundry()
+    hermes = RecordingHermes()
+
+    result = await FoundryWorker(foundry, hermes).run_claim(
+        claim(routine_id="routine-1")
+    )
+
+    assert result.status == "succeeded"
+    assert foundry.binds == []
+    assert foundry.completes == []
+    assert foundry.routine_binds == [
+        {
+            "expected_session_id": None,
+            "effective_session_id": "rotated-1",
+        }
+    ]
+    assert foundry.routine_results[0]["sequence"] == 3
+    assert foundry.routine_results[0]["outcome"] == "changed"
+    assert foundry.routine_results[0]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_approved_routine_without_continuation_support_fails_without_replaying_prompt():
+    foundry = RecordingFoundry()
+    hermes = RecordingHermes()
+
+    result = await FoundryWorker(foundry, hermes).run_claim(
+        claim(
+            routine_id="routine-1",
+            approval={
+                "action_attempt_id": "action-1",
+                "continuation": {"tool": "example"},
+            },
+        )
+    )
+
+    assert result.status == "failed"
+    assert foundry.routine_results[0]["outcome"] == "failed"
+    assert hermes.streams == []
 
 
 @pytest.mark.asyncio

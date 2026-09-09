@@ -1,3 +1,4 @@
+import json
 import secrets
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -39,10 +40,11 @@ from runtime.services.profiles import (
     ensure_runtime_profile,
     list_profile_reconciliation,
 )
+from runtime.services.routines import append_runtime_routine_result
 from runtime.services.runtime_auth import authenticate_runtime_token
 from runtime.services.runtime_intents import request_runtime_intent
 from runtime.services.runtime_readiness import accept_runtime_readiness
-from runtime.services.sessions import update_session_binding
+from runtime.services.sessions import bind_routine_session, update_session_binding
 from runtime.services.workspaces import register_workspace
 from runtime.soul import render_default_allies_soul
 
@@ -388,6 +390,45 @@ def register(api: NinjaExtraAPI) -> None:
         except RuntimeDomainError as exc:
             return _error(exc)
 
+    @api.put("/runtime/attempts/{attempt_id}/routine-session-binding", auth=None)
+    def routine_session_binding(
+        request: HttpRequest,
+        attempt_id,
+        payload: SessionBindingRequest,
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            receipt = bind_routine_session(
+                context,
+                attempt_id,
+                _lease_token(request),
+                payload.expected_session_id,
+                payload.effective_session_id,
+            )
+            return JsonResponse({"session_id": receipt.session_id}, status=200)
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.post("/runtime/attempts/{attempt_id}/routine-result", auth=None)
+    def routine_result(request: HttpRequest, attempt_id):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            body = _json_body(request)
+            result = append_runtime_routine_result(
+                context,
+                attempt_id,
+                _lease_token(request),
+                event_id=body.get("event_id"),
+                sequence=body.get("sequence"),
+                outcome=body.get("outcome"),
+                text=body.get("text"),
+                references=body.get("references", []),
+                delayed=body.get("delayed"),
+            )
+            return JsonResponse(result, status=200)
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
     @api.post("/runtime/attempts/{attempt_id}/stopped", auth=None)
     def stopped(request: HttpRequest, attempt_id, payload: StoppedRequest):
         try:
@@ -462,6 +503,16 @@ def _bearer(request: HttpRequest) -> str:
     if not token:
         raise RuntimeAuthorizationError("invalid runtime credential")
     return token
+
+
+def _json_body(request: HttpRequest) -> dict:
+    try:
+        value = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeValidationError("request body must be JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeValidationError("request body must be an object")
+    return value
 
 
 def _authenticate_cloud_service(request: HttpRequest) -> None:
@@ -583,6 +634,7 @@ def _claim_json(claim):
         "expires_at": _timestamp(claim.expires_at),
         "payload": claim.payload,
         "claim_id": str(claim.claim_id),
+        "routine_id": str(claim.routine_id) if claim.routine_id is not None else None,
     }
 
 

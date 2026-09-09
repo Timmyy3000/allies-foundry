@@ -1,0 +1,440 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4, uuid5
+
+import pytest
+from django.utils import timezone as django_timezone
+
+from runtime.exceptions import RuntimeConflictError
+from runtime.models import (
+    AttemptStatus,
+    ConversationBinding,
+    EventDeliveryState,
+    Execution,
+    ExecutionEventDelivery,
+    Lease,
+    LeaseState,
+    RoutineApprovalAction,
+    RoutineApprovalStatus,
+    RoutineExecution,
+    RoutineLeaseAcquisition,
+    RoutineRunStatus,
+    RuntimeProfile,
+    RuntimeProfileLifecycleState,
+    Workspace,
+    WorkspaceProvisioningPhase,
+)
+from runtime.routine_contracts import (
+    RoutineApprovalDecision,
+    RoutineApprovalRequested,
+    RoutineDispatch,
+    RoutineResult,
+    parse_routine_message,
+    routine_fingerprint,
+)
+from runtime.services.claims import claim_next_execution
+from runtime.services.routines import (
+    PROFILE_ID_NAMESPACE,
+    accept_routine_dispatch,
+    append_runtime_routine_result,
+    decide_routine_approval,
+    enable_routine_admission,
+    expire_routine_approvals,
+    request_routine_approval,
+)
+from runtime.services.runtime_auth import (
+    authenticate_runtime_token,
+    issue_runtime_credential,
+)
+from runtime.services.sessions import bind_routine_session
+
+
+@pytest.fixture
+def routine_context(db):
+    workspace = Workspace.objects.create(
+        tenant_ref="routine-tenant",
+        fly_app_ref="routine-app",
+        volume_ref="routine-volume",
+        machine_ref="routine-machine",
+        machine_generation=7,
+        provisioning_phase=WorkspaceProvisioningPhase.IDLE,
+        ready_generation=7,
+        ready_start_epoch=0,
+        ready_boot_id=uuid4(),
+        runtime_last_seen_at=django_timezone.now(),
+    )
+    owner_id = uuid4()
+    ally_id = uuid4()
+    cloud_binding_id = uuid4()
+    profile_id = uuid5(PROFILE_ID_NAMESPACE, str(cloud_binding_id))
+    profile = RuntimeProfile.objects.create(
+        id=profile_id,
+        workspace=workspace,
+        ally_ref=str(ally_id),
+        hermes_profile_key="routine_ally",
+        lifecycle_state=RuntimeProfileLifecycleState.ACTIVE,
+        materialized_generation=workspace.machine_generation,
+        seed_payload={"model": "gpt-5.6-luna"},
+    )
+    main_conversation_id = uuid4()
+    ConversationBinding.objects.create(
+        profile=profile,
+        cloud_conversation_ref=str(main_conversation_id),
+    )
+    enable_routine_admission(
+        workspace.id,
+        release_digest="sha256:routines-test",
+        machine_generation=workspace.machine_generation,
+        runtime_start_epoch=workspace.runtime_start_epoch,
+    )
+    issued = issue_runtime_credential(workspace.id, "routine-runtime-secret")
+    context = authenticate_runtime_token(issued.raw_token)
+    return {
+        "workspace": workspace,
+        "profile": profile,
+        "owner_id": owner_id,
+        "ally_id": ally_id,
+        "cloud_binding_id": cloud_binding_id,
+        "main_conversation_id": main_conversation_id,
+        "context": context,
+        "base": datetime(2026, 9, 9, 8, 0, tzinfo=UTC),
+    }
+
+
+def dispatch_payload(state, *, ordinal: int = 1) -> dict:
+    base = state["base"] + timedelta(minutes=ordinal)
+    routine_id = uuid4()
+    occurrence_id = uuid4()
+    run_id = uuid4()
+    run_conversation_id = uuid4()
+    value = {
+        "schema_version": "v1",
+        "kind": "routine.dispatch",
+        "producer": "cloud",
+        "service_identity": "cloud-service",
+        "command_id": str(uuid4()),
+        "idempotency_key": str(uuid4()),
+        "routine_id": str(routine_id),
+        "routine_revision": 4,
+        "schedule_generation": 1,
+        "occurrence_id": str(occurrence_id),
+        "run_id": str(run_id),
+        "scheduled_at": base.isoformat().replace("+00:00", "Z"),
+        "delayed": False,
+        "main_conversation_id": str(state["main_conversation_id"]),
+        "run_conversation_id": str(run_conversation_id),
+        "cloud_binding_id": str(state["cloud_binding_id"]),
+        "execution_prompt": f"Run routine {ordinal}.",
+        "title_snapshot": f"Routine {ordinal}",
+        "scope": {
+            "kind": "workspace",
+            "workspace_id": str(state["workspace"].id),
+            "owner_user_id": str(state["owner_id"]),
+            "ally_id": str(state["ally_id"]),
+            "cloud_binding_id": str(state["cloud_binding_id"]),
+        },
+        "issued_at": base.isoformat().replace("+00:00", "Z"),
+        "deadline_at": (base + timedelta(seconds=60)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "fingerprint": "",
+    }
+    value["fingerprint"] = routine_fingerprint(value)
+    return value
+
+
+def dispatch(state, *, ordinal: int = 1) -> tuple[RoutineDispatch, RoutineExecution]:
+    command = RoutineDispatch.model_validate(dispatch_payload(state, ordinal=ordinal))
+    receipt = accept_routine_dispatch(command)
+    return command, RoutineExecution.objects.get(execution_id=receipt.execution_id)
+
+
+def approval_decision_payload(state, routine, action, *, decision: str = "approve") -> dict:
+    base = state["base"] + timedelta(minutes=10)
+    value = {
+        "schema_version": "v1",
+        "kind": "routine.approval_decision",
+        "producer": "cloud",
+        "service_identity": "cloud-service",
+        "command_id": str(uuid4()),
+        "idempotency_key": str(uuid4()),
+        "approval_request_id": str(action.approval_request_id),
+        "action_attempt_id": str(action.action_attempt_id),
+        "run_id": str(routine.run_id),
+        "attempt_id": str(routine.current_attempt_id),
+        "generation": routine.generation,
+        "decision": decision,
+        "decided_at": base.isoformat().replace("+00:00", "Z"),
+        "scope": {
+            "kind": "workspace",
+            "workspace_id": str(state["workspace"].id),
+            "owner_user_id": str(state["owner_id"]),
+            "ally_id": str(state["ally_id"]),
+            "cloud_binding_id": str(state["cloud_binding_id"]),
+        },
+        "issued_at": base.isoformat().replace("+00:00", "Z"),
+        "deadline_at": (base + timedelta(seconds=60)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "fingerprint": "",
+    }
+    value["fingerprint"] = routine_fingerprint(value)
+    return value
+
+
+def test_same_profile_routines_have_distinct_leases_and_sessions(routine_context):
+    state = routine_context
+    first_command, first = dispatch(state, ordinal=1)
+    second_command, second = dispatch(state, ordinal=2)
+
+    first_claim = claim_next_execution(state["context"], uuid4(), 3)
+    second_claim = claim_next_execution(state["context"], uuid4(), 3)
+
+    assert first_claim is not None
+    assert second_claim is not None
+    assert {first_claim.routine_id, second_claim.routine_id} == {
+        first.routine_id,
+        second.routine_id,
+    }
+    assert first_claim.lease_id != second_claim.lease_id
+    assert first_claim.conversation_id != second_claim.conversation_id
+    main_execution = Execution.objects.create(
+        workspace=state["workspace"],
+        profile=state["profile"],
+        idempotency_key="main-turn-after-routines",
+        input_payload={
+            "message": "main turn",
+            "cloud_conversation_ref": str(state["main_conversation_id"]),
+        },
+    )
+    main_claim = claim_next_execution(state["context"], uuid4(), 3)
+    assert main_claim is not None
+    assert main_claim.execution_id == main_execution.id
+    assert main_claim.routine_id is None
+
+    first_claim = first_claim if first_claim.routine_id == first.routine_id else second_claim
+    first_session = bind_routine_session(
+        state["context"],
+        first_claim.attempt_id,
+        first_claim.lease_token,
+        None,
+        "routine-session-1",
+    )
+    assert first_session.session_id == "routine-session-1"
+    binding = ConversationBinding.objects.get(profile=state["profile"])
+    assert binding.cloud_conversation_ref == str(state["main_conversation_id"])
+    assert binding.hermes_session_id is None
+
+    result = append_runtime_routine_result(
+        state["context"],
+        first_claim.attempt_id,
+        first_claim.lease_token,
+        event_id=uuid4(),
+        sequence=1,
+        outcome="unchanged",
+        text="No changes were needed.",
+        references=[],
+        delayed=False,
+    )
+    assert result["status"] == "succeeded"
+    event_delivery = ExecutionEventDelivery.objects.get(
+        event__event_id=UUID(result["receipt"]["event_id"])
+    )
+    assert event_delivery.state == EventDeliveryState.PENDING
+    event = parse_routine_message(json.loads(event_delivery.envelope_bytes))
+    assert isinstance(event, RoutineResult)
+    assert event.outcome == "unchanged"
+    replay = append_runtime_routine_result(
+        state["context"],
+        first_claim.attempt_id,
+        first_claim.lease_token,
+        event_id=UUID(result["receipt"]["event_id"]),
+        sequence=1,
+        outcome="unchanged",
+        text="No changes were needed.",
+        references=[],
+        delayed=False,
+    )
+    assert replay == result
+
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert first.status == RoutineRunStatus.SUCCEEDED
+    assert second.status == RoutineRunStatus.WORKING
+    assert first_command.run_conversation_id != second_command.run_conversation_id
+
+
+def test_approval_wait_retires_and_reacquires_one_lease(routine_context):
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+    old_lease_id = claim.lease_id
+    old_acquisition = RoutineLeaseAcquisition.objects.get(claim_id=claim.claim_id)
+    action_attempt_id = uuid4()
+    approval_request_id = uuid4()
+
+    event = request_routine_approval(
+        routine.id,
+        action_attempt_id=action_attempt_id,
+        approval_request_id=approval_request_id,
+        action_digest="a" * 64,
+        provider_idempotency_key="provider-action-1",
+        continuation={"tool": "example", "arguments": {"value": 1}},
+        event_sequence=1,
+        now=state["base"],
+    )
+    routine.refresh_from_db()
+    old_acquisition.refresh_from_db()
+    old_lease = Lease.objects.get(pk=old_lease_id)
+    assert routine.status == RoutineRunStatus.APPROVAL_WAITING
+    assert routine.current_attempt.status == AttemptStatus.APPROVAL_WAITING
+    assert old_lease.state == LeaseState.RELEASED
+    assert old_acquisition.current is False
+    assert isinstance(
+        parse_routine_message(
+            json.loads(ExecutionEventDelivery.objects.get(event=event).envelope_bytes)
+        ),
+        RoutineApprovalRequested,
+    )
+
+    action = RoutineApprovalAction.objects.get(approval_request_id=approval_request_id)
+    decision = RoutineApprovalDecision.model_validate(
+        approval_decision_payload(state, routine, action)
+    )
+    receipt = decide_routine_approval(decision, now=state["base"] + timedelta(minutes=1))
+
+    assert receipt.result_code == "APPROVAL_AUTHORIZED"
+    assert receipt.request_status == RoutineApprovalStatus.AUTHORIZING
+    assert receipt.run_status == RoutineRunStatus.WORKING
+    action.refresh_from_db()
+    routine.refresh_from_db()
+    paused_lease = Lease.objects.get(pk=old_lease_id)
+    acquisitions = list(
+        RoutineLeaseAcquisition.objects.filter(lease_id=old_lease_id).order_by("ordinal")
+    )
+    assert len(acquisitions) == 1
+    assert acquisitions[0].current is False
+    assert paused_lease.state == LeaseState.RELEASED
+    assert action.status == RoutineApprovalStatus.AUTHORIZING
+    assert routine.status == RoutineRunStatus.WORKING
+    assert routine.current_attempt.status == AttemptStatus.QUEUED
+
+    resumed_claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert resumed_claim is not None
+    assert resumed_claim.lease_id == old_lease_id
+    assert resumed_claim.payload["routine_approval"]["continuation"] == {
+        "tool": "example",
+        "arguments": {"value": 1},
+    }
+    new_lease = Lease.objects.get(pk=old_lease_id)
+    acquisitions = list(
+        RoutineLeaseAcquisition.objects.filter(lease_id=old_lease_id).order_by("ordinal")
+    )
+    assert len(acquisitions) == 2
+    assert acquisitions[0].current is False
+    assert acquisitions[1].current is True
+    assert new_lease.state == LeaseState.ACTIVE
+    assert new_lease.current_acquisition_id == acquisitions[1].id
+
+    replay = decide_routine_approval(decision, now=state["base"] + timedelta(minutes=2))
+    assert replay.model_dump(mode="json") == receipt.model_dump(mode="json")
+
+    append_runtime_routine_result(
+        state["context"],
+        resumed_claim.attempt_id,
+        resumed_claim.lease_token,
+        event_id=uuid4(),
+        sequence=100001,
+        outcome="failed",
+        text="Approved action continuation is unavailable; no action was executed.",
+        references=[],
+        delayed=False,
+    )
+    action.refresh_from_db()
+    assert action.status == RoutineApprovalStatus.CANCELLED
+    assert action.action_state == "manual_reconciliation"
+
+    with pytest.raises(RuntimeConflictError):
+        request_routine_approval(
+            routine.id,
+            action_attempt_id=action_attempt_id,
+            approval_request_id=approval_request_id,
+            action_digest="b" * 64,
+            provider_idempotency_key="provider-action-1",
+            continuation={"tool": "example"},
+            now=state["base"],
+        )
+
+
+def test_expiry_fences_waiting_routine_without_a_decision_receipt(routine_context):
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+    request_routine_approval(
+        routine.id,
+        action_attempt_id=uuid4(),
+        action_digest="a" * 64,
+        provider_idempotency_key="provider-action-expiry",
+        expires_at=state["base"] + timedelta(minutes=1),
+        now=state["base"],
+    )
+
+    assert (
+        expire_routine_approvals(
+            now=state["base"] + timedelta(minutes=1),
+        )
+        == 1
+    )
+    routine.refresh_from_db()
+    action = RoutineApprovalAction.objects.get(routine_execution=routine)
+    assert routine.status == RoutineRunStatus.EXPIRED
+    assert action.status == RoutineApprovalStatus.EXPIRED
+    assert routine.current_attempt.status == AttemptStatus.FAILED
+
+
+def test_expired_routine_lease_reuses_one_lease_with_a_new_acquisition(routine_context):
+    state = routine_context
+    _command, routine = dispatch(state)
+    first_claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert first_claim is not None
+    old_lease_id = first_claim.lease_id
+    Lease.objects.filter(pk=old_lease_id).update(
+        expires_at=django_timezone.now() - timedelta(seconds=1)
+    )
+
+    second_claim = claim_next_execution(state["context"], uuid4(), 2)
+
+    assert second_claim is not None
+    assert second_claim.lease_id == old_lease_id
+    acquisitions = list(
+        RoutineLeaseAcquisition.objects.filter(lease_id=old_lease_id).order_by("ordinal")
+    )
+    assert [acquisition.current for acquisition in acquisitions] == [False, True]
+    routine.refresh_from_db()
+    assert routine.status == RoutineRunStatus.WORKING
+
+
+def test_expired_routine_after_session_bind_is_fenced_not_redispatched(routine_context):
+    state = routine_context
+    _command, routine = dispatch(state)
+    first_claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert first_claim is not None
+    bind_routine_session(
+        state["context"],
+        first_claim.attempt_id,
+        first_claim.lease_token,
+        None,
+        "routine-session-bound",
+    )
+    Lease.objects.filter(pk=first_claim.lease_id).update(
+        expires_at=django_timezone.now() - timedelta(seconds=1)
+    )
+
+    assert claim_next_execution(state["context"], uuid4(), 2) is None
+    routine.refresh_from_db()
+    assert routine.status == RoutineRunStatus.FAILED
+    assert routine.current_attempt.status == AttemptStatus.UNKNOWN

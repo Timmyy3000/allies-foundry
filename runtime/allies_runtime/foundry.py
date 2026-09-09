@@ -181,6 +181,7 @@ class FoundryClaim:
     expires_at: datetime | str | None
     payload: Mapping[str, Any]
     claim_id: str
+    routine_id: str | None = None
 
     def __repr__(self) -> str:  # pragma: no cover - defensive redaction
         return (
@@ -666,6 +667,11 @@ class FoundryClient:
             if isinstance(payload.get("payload"), Mapping)
             else {},
             claim_id=str(payload["claim_id"]),
+            routine_id=(
+                str(payload["routine_id"])
+                if payload.get("routine_id") is not None
+                else None
+            ),
         )
 
     async def reconciliation_snapshot(self) -> RuntimeReconciliationSnapshot:
@@ -899,6 +905,31 @@ class FoundryClient:
             )
         return SessionReceipt(str(result["session_id"]))
 
+    async def bind_routine(
+        self,
+        attempt_id: str | UUID,
+        lease_token: str,
+        *,
+        expected_session_id: str | None,
+        effective_session_id: str,
+    ) -> SessionReceipt:
+        result = await self._request(
+            "PUT",
+            f"/api/v1/runtime/attempts/{attempt_id}/routine-session-binding",
+            lease_token=lease_token,
+            body={
+                "expected_session_id": expected_session_id,
+                "effective_session_id": effective_session_id,
+            },
+        )
+        if not result or "session_id" not in result:
+            raise FoundryError(
+                "Foundry routine session response was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
+        return SessionReceipt(str(result["session_id"]))
+
     update_session_binding = bind
 
     async def stopped(
@@ -951,6 +982,36 @@ class FoundryClient:
         return self._terminal(result)
 
     complete_attempt = complete
+
+    async def routine_result(
+        self,
+        attempt_id: str | UUID,
+        lease_token: str,
+        *,
+        event_id: str | UUID,
+        sequence: int,
+        outcome: str,
+        text: str,
+        references: list[Mapping[str, str]],
+        delayed: bool,
+    ) -> TerminalReceipt:
+        _validate_sequence(sequence, MAX_TERMINAL_SEQUENCE, "routine result")
+        if outcome not in {"changed", "unchanged", "failed"}:
+            raise ValueError("routine result outcome is invalid")
+        result = await self._request(
+            "POST",
+            f"/api/v1/runtime/attempts/{attempt_id}/routine-result",
+            lease_token=lease_token,
+            body={
+                "event_id": str(event_id),
+                "sequence": sequence,
+                "outcome": outcome,
+                "text": text,
+                "references": [dict(reference) for reference in references],
+                "delayed": delayed,
+            },
+        )
+        return self._terminal(result)
 
     async def fail(
         self,
@@ -1228,12 +1289,21 @@ class FoundryWorker:
         lost = asyncio.Event()
         renewal: asyncio.Task[Any] | None = None
         sequence = 0
+        result_text: list[str] = []
         try:
             try:
-                message = validate_stream_message(claim.payload.get("message"))
+                message = validate_stream_message(
+                    claim.payload.get(
+                        "execution_prompt" if claim.routine_id is not None else "message"
+                    )
+                )
             except ValueError:
                 raise InvalidRequestError("Execution message was invalid")
-            input_conversation = claim.payload.get("cloud_conversation_ref")
+            input_conversation = claim.payload.get(
+                "run_conversation_id"
+                if claim.routine_id is not None
+                else "cloud_conversation_ref"
+            )
             if claim.conversation_id is None:
                 if (
                     not isinstance(input_conversation, str)
@@ -1257,6 +1327,32 @@ class FoundryWorker:
 
             identifiers = stable_session_identifiers(claim.profile_id, conversation_id)
             session_id = claim.session_id or identifiers.candidate_id
+            approval = claim.payload.get("routine_approval")
+            if claim.routine_id is not None and isinstance(approval, Mapping):
+                routine_result = getattr(self.foundry, "routine_result", None)
+                if not callable(routine_result):
+                    raise HermesError(
+                        "Foundry routine continuation result endpoint was unavailable"
+                    )
+                return await _retry_response_loss(
+                    lambda: routine_result(
+                        claim.attempt_id,
+                        claim.lease_token,
+                        event_id=deterministic_event_id(
+                            claim.attempt_id,
+                            claim.stream_id,
+                            MAX_TERMINAL_SEQUENCE,
+                        ),
+                        sequence=MAX_TERMINAL_SEQUENCE,
+                        outcome="failed",
+                        text=(
+                            "Approved action continuation is unavailable; "
+                            "no action was executed."
+                        ),
+                        references=[],
+                        delayed=bool(claim.payload.get("delayed", False)),
+                    )
+                )
             bootstrap = _first_turn_bootstrap(claim.payload.get("bootstrap"))
             if bootstrap is not None and claim.session_id is not None:
                 raise InvalidRequestError("Execution bootstrap arrived after binding")
@@ -1352,6 +1448,10 @@ class FoundryWorker:
                     "activity.completed",
                 }:
                     raise HermesError("Hermes event identity did not match claim")
+                if event.name == "message.delta":
+                    delta_text = event.payload.get("text")
+                    if isinstance(delta_text, str):
+                        result_text.append(delta_text)
                 if lost.is_set():
                     break
                 if sequence >= MAX_RUNTIME_EVENT_SEQUENCE:
@@ -1426,15 +1526,30 @@ class FoundryWorker:
             await _close_stream(stream)
             stream = None
             try:
-                await _retry_response_loss(
-                    lambda: self.foundry.bind(
-                        claim.attempt_id,
-                        claim.lease_token,
-                        cloud_conversation_ref=conversation_id,
-                        expected_session_id=claim.session_id,
-                        effective_session_id=terminal.session_id,
+                if claim.routine_id is not None:
+                    bind_routine = getattr(self.foundry, "bind_routine", None)
+                    if not callable(bind_routine):
+                        raise HermesError(
+                            "Foundry routine session binding was unavailable"
+                        )
+                    await _retry_response_loss(
+                        lambda: bind_routine(
+                            claim.attempt_id,
+                            claim.lease_token,
+                            expected_session_id=claim.session_id,
+                            effective_session_id=terminal.session_id,
+                        )
                     )
-                )
+                else:
+                    await _retry_response_loss(
+                        lambda: self.foundry.bind(
+                            claim.attempt_id,
+                            claim.lease_token,
+                            cloud_conversation_ref=conversation_id,
+                            expected_session_id=claim.session_id,
+                            effective_session_id=terminal.session_id,
+                        )
+                    )
             except ResponseLossError:
                 return await self.foundry.stopped(
                     claim.attempt_id,
@@ -1442,6 +1557,28 @@ class FoundryWorker:
                     reason="session_response_lost",
                 )
             sequence += 1
+            if claim.routine_id is not None:
+                routine_result = getattr(self.foundry, "routine_result", None)
+                if not callable(routine_result):
+                    raise HermesError("Foundry routine result endpoint was unavailable")
+                outcome = terminal.payload.get("outcome")
+                if outcome not in {"changed", "unchanged", "failed"}:
+                    outcome = "changed" if result_text else "unchanged"
+                return await _retry_response_loss(
+                    lambda: routine_result(
+                        claim.attempt_id,
+                        claim.lease_token,
+                        event_id=deterministic_event_id(
+                            claim.attempt_id, claim.stream_id, sequence
+                        ),
+                        sequence=sequence,
+                        outcome=outcome,
+                        text="".join(result_text)
+                        or "Routine completed without a report.",
+                        references=terminal.payload.get("references", []),
+                        delayed=bool(claim.payload.get("delayed", False)),
+                    )
+                )
             try:
                 return await _retry_response_loss(
                     lambda: self.foundry.complete(
