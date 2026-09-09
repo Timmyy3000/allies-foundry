@@ -490,12 +490,18 @@ def _reconcile_expired_lease(
         return
 
     if unresolved:
+        routine_was_terminal = routine is not None and routine.status in {
+            RoutineRunStatus.SUCCEEDED,
+            RoutineRunStatus.FAILED,
+            RoutineRunStatus.CANCELLED,
+            RoutineRunStatus.EXPIRED,
+        }
         if not cleanup_pending:
             from .events import _append_lease_expired_failure
 
             _append_lease_expired_failure(attempt, lease)
         routine_result_event = None
-        if routine is not None:
+        if routine is not None and not routine_was_terminal:
             from .routines import _record_terminal_failure_result
 
             routine_result_event = _record_terminal_failure_result(
@@ -513,7 +519,7 @@ def _reconcile_expired_lease(
         }:
             execution.status = ExecutionStatus.FAILED
             execution.save(update_fields=["status", "updated_at"])
-        if routine is not None:
+        if routine is not None and not routine_was_terminal:
             routine.status = RoutineRunStatus.FAILED
             routine.terminal_receipt = {
                 **(routine.terminal_receipt or {}),
