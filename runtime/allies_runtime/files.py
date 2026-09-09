@@ -6,12 +6,13 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import time
 import unicodedata
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .errors import IncomingFileError
 
@@ -21,9 +22,24 @@ MAX_TOTAL_BYTES = 50_000_000
 MAX_CHUNK_BYTES = 64 * 1024
 MAX_FILE_SECONDS = 120.0
 MAX_SET_SECONDS = 300.0
+MAX_PUBLICATION_MANIFESTS = 20
+MAX_PUBLICATION_INCOMPLETE = 2
+MAX_PUBLICATION_FILE_BYTES = 25_000_000
+MAX_PUBLICATION_BYTES = 50_000_000
+MAX_PROFILE_PUBLICATION_BYTES = 100_000_000
+MAX_VOLUME_PUBLICATION_BYTES = 250_000_000
+MIN_VOLUME_FREE_BYTES = 250_000_000
+_PUBLICATION_SCHEMA = "allies.publication.v1"
 _RECEIPT_SCHEMA = "allies.incoming-files.v1"
 _WINDOWS_RESERVED_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL", *(f"COM{number}" for number in range(1, 10)), *(f"LPT{number}" for number in range(1, 10))}
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{number}" for number in range(1, 10)),
+        *(f"LPT{number}" for number in range(1, 10)),
+    }
 )
 
 
@@ -68,7 +84,168 @@ class StagedManifest:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PublicationFile:
+    source_version_id: str
+    name: str
+    size: int
+    sha256: str
+    spool_path: str
+
+    def frozen_value(self) -> dict[str, object]:
+        return {
+            "source_version_id": self.source_version_id,
+            "name": self.name,
+            "size": self.size,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationManifest:
+    publication_id: str
+    manifest_sha256: str
+    files: tuple[PublicationFile, ...]
+
+    def frozen_files(self) -> list[dict[str, object]]:
+        return [item.frozen_value() for item in self.files]
+
+
 FileFetcher = Callable[[IncomingFile], AsyncIterator[bytes]]
+
+
+def freeze_publication(
+    workspace: Path,
+    publication_id: str,
+    paths: Sequence[str],
+) -> PublicationManifest:
+    """Copy an immutable, verified snapshot outside Hermes' workspace."""
+
+    workspace = _workspace(workspace)
+    publication_id = _command_id(publication_id)
+    source_paths = _publication_paths(paths)
+    profile = workspace.parent
+    volume_root = profile.parent.parent
+    spool_root = volume_root / ".allies-publications" / profile.name
+    manifest_path = spool_root / f"{publication_id}.json"
+    existing = _read_publication_manifest(manifest_path, publication_id, source_paths)
+    if existing is not None:
+        return existing
+    total = sum((workspace / path).stat().st_size for path in source_paths)
+    if total > MAX_PUBLICATION_BYTES:
+        raise IncomingFileError("publication file set exceeds 50 MB")
+    _reserve_publication(volume_root, profile.name, publication_id, total)
+    temporary = spool_root / f".{publication_id}.{os.urandom(8).hex()}.copy"
+    final = spool_root / publication_id
+    try:
+        _directory(spool_root)
+        if final.exists() or temporary.exists():
+            raise IncomingFileError("publication spool state was invalid")
+        temporary.mkdir(mode=0o700)
+        files = tuple(
+            _copy_publication_file(workspace, source, temporary, index)
+            for index, source in enumerate(source_paths, start=1)
+        )
+        manifest = PublicationManifest(
+            publication_id=publication_id,
+            manifest_sha256=_publication_digest(files),
+            files=files,
+        )
+        os.replace(temporary, final)
+        _sync_directory(spool_root)
+        _write_publication_manifest(manifest_path, manifest, source_paths)
+        _mark_publication_frozen(volume_root, publication_id)
+        return manifest
+    except IncomingFileError:
+        _remove_tree(temporary)
+        _remove_tree(final)
+        _release_publication(volume_root, publication_id)
+        raise
+    except OSError:
+        _remove_tree(temporary)
+        _remove_tree(final)
+        _release_publication(volume_root, publication_id)
+        raise IncomingFileError("publication snapshot could not be committed") from None
+
+
+def publication_spool_path(
+    workspace: Path, publication_id: str, source_version_id: str
+) -> Path:
+    """Return one journal-owned frozen spool without exposing arbitrary paths."""
+
+    workspace = _workspace(workspace)
+    publication_id = _command_id(publication_id)
+    source_version_id = _command_id(source_version_id)
+    manifest = _read_publication_manifest(
+        workspace.parent.parent.parent
+        / ".allies-publications"
+        / workspace.parent.name
+        / f"{publication_id}.json",
+        publication_id,
+        None,
+    )
+    if manifest is None:
+        raise IncomingFileError("publication snapshot was unavailable")
+    for item in manifest.files:
+        if item.source_version_id == source_version_id:
+            path = (
+                workspace.parent.parent.parent
+                / ".allies-publications"
+                / workspace.parent.name
+                / publication_id
+                / item.spool_path
+            )
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size != item.size
+            ):
+                raise IncomingFileError("publication snapshot was unavailable")
+            return path
+    raise IncomingFileError("publication file was unavailable")
+
+
+def release_publication_spool(workspace: Path, publication_id: str) -> None:
+    """Release a frozen spool only after Cloud has a durable ready receipt."""
+
+    workspace = _workspace(workspace)
+    publication_id = _command_id(publication_id)
+    profile = workspace.parent
+    volume_root = profile.parent.parent
+    spool_root = volume_root / ".allies-publications" / profile.name
+    manifest_path = spool_root / f"{publication_id}.json"
+    manifest = _read_publication_manifest(manifest_path, publication_id, None)
+    if manifest is None:
+        return
+    directory = spool_root / publication_id
+    if directory.is_symlink() or not directory.is_dir():
+        raise IncomingFileError("publication spool was unsafe")
+    shutil.rmtree(directory)
+    manifest_path.unlink(missing_ok=True)
+    _sync_directory(spool_root)
+    _release_publication(volume_root, publication_id)
+
+
+def cleanup_profile_publication_spools(volume_root: Path, profile_key: str) -> None:
+    """Remove one root-owned profile spool namespace under its cleanup fence."""
+
+    if not isinstance(profile_key, str) or not profile_key or "/" in profile_key:
+        raise IncomingFileError("publication profile identity was invalid")
+    root = volume_root / ".allies-publications"
+    target = root / profile_key
+    if target.exists():
+        if target.is_symlink() or not target.is_dir():
+            raise IncomingFileError("publication spool was unsafe")
+        shutil.rmtree(target)
+        _sync_directory(root)
+    records = _read_ledger(volume_root)
+    changed = False
+    for publication_id, record in list(records.items()):
+        if record["profile"] == profile_key:
+            del records[publication_id]
+            changed = True
+    if changed:
+        _write_ledger(volume_root, records)
 
 
 def parse_incoming_files(value: object) -> tuple[IncomingFile, ...]:
@@ -129,7 +306,10 @@ def validate_hermes_file_context(value: object) -> dict[str, object]:
         "files",
     }:
         raise IncomingFileError("incoming file context was invalid")
-    if value.get("schema_version") != "v1" or value.get("kind") != "allies_incoming_files":
+    if (
+        value.get("schema_version") != "v1"
+        or value.get("kind") != "allies_incoming_files"
+    ):
         raise IncomingFileError("incoming file context was invalid")
     rows = value.get("files")
     if not isinstance(rows, list):
@@ -138,7 +318,12 @@ def validate_hermes_file_context(value: object) -> dict[str, object]:
     paths = []
     for row in rows:
         if not isinstance(row, Mapping) or set(row) != {
-            "file_id", "name", "media_type", "size", "sha256", "path"
+            "file_id",
+            "name",
+            "media_type",
+            "size",
+            "sha256",
+            "path",
         }:
             raise IncomingFileError("incoming file context was invalid")
         manifest.append({key: row.get(key) for key in row if key != "path"})
@@ -187,7 +372,9 @@ async def stage_incoming_files(
     staging_root = workspace.parent / ".allies-incoming-staging"
     _directory(staging_root)
     temporary = staging_root / f"{command_id}.{os.urandom(8).hex()}"
-    final_root = _next_target(workspace / "attachments", command_id, previous is not None)
+    final_root = _next_target(
+        workspace / "attachments", command_id, previous is not None
+    )
     files: list[StagedFile] = []
     try:
         temporary.mkdir(mode=0o700)
@@ -199,7 +386,9 @@ async def stage_incoming_files(
             files.append(
                 StagedFile(
                     descriptor=descriptor,
-                    path=(Path("attachments") / final_root.name / target_name).as_posix(),
+                    path=(
+                        Path("attachments") / final_root.name / target_name
+                    ).as_posix(),
                 )
             )
         _directory(final_root.parent)
@@ -242,7 +431,11 @@ async def _download_file(
             async for chunk in source:
                 _check_deadline(started, clock, MAX_FILE_SECONDS)
                 _check_deadline(set_started, clock, MAX_SET_SECONDS)
-                if not isinstance(chunk, bytes) or not chunk or len(chunk) > MAX_CHUNK_BYTES:
+                if (
+                    not isinstance(chunk, bytes)
+                    or not chunk
+                    or len(chunk) > MAX_CHUNK_BYTES
+                ):
                     raise IncomingFileError("incoming file transport was invalid")
                 received += len(chunk)
                 if received > descriptor.size:
@@ -267,7 +460,10 @@ def _receipt_manifest(
 ) -> tuple[StagedFile, ...] | None:
     if not isinstance(value, Mapping) or value.get("schema") != _RECEIPT_SCHEMA:
         return None
-    if value.get("command_id") != command_id or value.get("manifest_sha256") != manifest_sha256:
+    if (
+        value.get("command_id") != command_id
+        or value.get("manifest_sha256") != manifest_sha256
+    ):
         raise IncomingFileError("incoming file replay conflicted with its receipt")
     rows = value.get("files")
     if not isinstance(rows, list) or len(rows) != len(descriptors):
@@ -275,10 +471,17 @@ def _receipt_manifest(
     staged: list[StagedFile] = []
     for descriptor, row in zip(descriptors, rows, strict=True):
         if not isinstance(row, Mapping) or set(row) != {
-            "file_id", "name", "media_type", "size", "sha256", "path"
+            "file_id",
+            "name",
+            "media_type",
+            "size",
+            "sha256",
+            "path",
         }:
             return None
-        if any(row.get(key) != value for key, value in descriptor.manifest_value().items()):
+        if any(
+            row.get(key) != value for key, value in descriptor.manifest_value().items()
+        ):
             raise IncomingFileError("incoming file replay conflicted with its receipt")
         path = row.get("path")
         if not isinstance(path, str) or not _safe_relative_path(path):
@@ -291,7 +494,11 @@ def _staged_files_match(workspace: Path, files: Sequence[StagedFile]) -> bool:
     for staged in files:
         path = workspace / staged.path
         try:
-            if path.is_symlink() or not path.is_file() or path.stat().st_size != staged.descriptor.size:
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size != staged.descriptor.size
+            ):
                 return False
             digest = hashlib.sha256()
             with path.open("rb") as handle:
@@ -335,7 +542,9 @@ def _write_receipt(path: Path, value: Mapping[str, object]) -> None:
         _sync_directory(path.parent)
     except OSError:
         temporary.unlink(missing_ok=True)
-        raise IncomingFileError("incoming file receipt could not be committed") from None
+        raise IncomingFileError(
+            "incoming file receipt could not be committed"
+        ) from None
 
 
 def _workspace(path: Path) -> Path:
@@ -376,7 +585,9 @@ def _safe_name(value: object) -> bool:
         and "\\" not in value
         and not any(character in '<>:"|?*' for character in value)
         and value.rstrip(". ") == value
-        and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+        and not any(
+            ord(character) < 0x20 or ord(character) == 0x7F for character in value
+        )
         and base_name not in _WINDOWS_RESERVED_NAMES
     )
 
@@ -386,7 +597,9 @@ def _safe_media_type(value: object) -> bool:
         isinstance(value, str)
         and 1 <= len(value.encode("utf-8")) <= 127
         and "/" in value
-        and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+        and not any(
+            ord(character) < 0x20 or ord(character) == 0x7F for character in value
+        )
     )
 
 
@@ -429,12 +642,314 @@ def _remove_tree(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def _publication_paths(value: Sequence[str]) -> tuple[Path, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise IncomingFileError("publication paths were invalid")
+    if not 1 <= len(value) <= MAX_FILES:
+        raise IncomingFileError("publication must contain from 1 to 10 files")
+    result: list[Path] = []
+    for relative in value:
+        if not isinstance(relative, str):
+            raise IncomingFileError("publication paths were invalid")
+        candidate = Path(relative)
+        if (
+            not relative
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+            or any(part.startswith(".") for part in candidate.parts)
+        ):
+            raise IncomingFileError("publication path was unsafe")
+        result.append(candidate)
+    if len(set(result)) != len(result):
+        raise IncomingFileError("publication paths were duplicated")
+    return tuple(result)
+
+
+def _copy_publication_file(
+    workspace: Path, relative: Path, destination: Path, ordinal: int
+) -> PublicationFile:
+    source = workspace / relative
+    try:
+        before = source.lstat()
+    except OSError:
+        raise IncomingFileError("publication source was unavailable") from None
+    if (
+        source.is_symlink()
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size > MAX_PUBLICATION_FILE_BYTES
+    ):
+        raise IncomingFileError("publication source was unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError:
+        raise IncomingFileError("publication source was unavailable") from None
+    output_name = f"{ordinal:02d}-{uuid4().hex}.bin"
+    output = destination / output_name
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or not os.path.samestat(before, opened)
+        ):
+            raise IncomingFileError("publication source was unsafe")
+        with output.open("xb") as handle:
+            while True:
+                chunk = os.read(descriptor, MAX_CHUNK_BYTES)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > MAX_PUBLICATION_FILE_BYTES:
+                    raise IncomingFileError("publication source exceeds 25 MB")
+                digest.update(chunk)
+                handle.write(chunk)
+                if shutil.disk_usage(destination).free < MIN_VOLUME_FREE_BYTES:
+                    raise IncomingFileError("local storage capacity is unavailable")
+            handle.flush()
+            os.fsync(handle.fileno())
+        after = source.lstat()
+        if not os.path.samestat(before, after) or (
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (after.st_size, after.st_mtime_ns):
+            raise IncomingFileError("publication source changed during copy")
+    except IncomingFileError:
+        output.unlink(missing_ok=True)
+        raise
+    except OSError:
+        output.unlink(missing_ok=True)
+        raise IncomingFileError("publication snapshot copy failed") from None
+    finally:
+        os.close(descriptor)
+    return PublicationFile(
+        source_version_id=str(uuid4()),
+        name=relative.name,
+        size=copied,
+        sha256=digest.hexdigest(),
+        spool_path=output_name,
+    )
+
+
+def _publication_digest(files: Sequence[PublicationFile]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            [item.frozen_value() for item in files],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _read_publication_manifest(
+    path: Path,
+    publication_id: str,
+    expected_paths: Sequence[Path] | None,
+) -> PublicationManifest | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+        raise IncomingFileError("publication journal was invalid")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise IncomingFileError("publication journal was invalid") from None
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema",
+        "publication_id",
+        "source_paths",
+        "manifest_sha256",
+        "files",
+    }:
+        raise IncomingFileError("publication journal was invalid")
+    source_paths = value.get("source_paths")
+    if (
+        value.get("schema") != _PUBLICATION_SCHEMA
+        or value.get("publication_id") != publication_id
+    ):
+        raise IncomingFileError("publication journal was invalid")
+    if not isinstance(source_paths, list) or any(
+        not isinstance(item, str) for item in source_paths
+    ):
+        raise IncomingFileError("publication journal was invalid")
+    if expected_paths is not None and source_paths != [
+        item.as_posix() for item in expected_paths
+    ]:
+        raise IncomingFileError("publication paths changed after freeze")
+    rows = value.get("files")
+    digest = value.get("manifest_sha256")
+    if (
+        not isinstance(rows, list)
+        or not isinstance(digest, str)
+        or len(rows) > MAX_FILES
+    ):
+        raise IncomingFileError("publication journal was invalid")
+    files: list[PublicationFile] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != {
+            "source_version_id",
+            "name",
+            "size",
+            "sha256",
+            "spool_path",
+        }:
+            raise IncomingFileError("publication journal was invalid")
+        try:
+            source_version_id = str(UUID(str(row["source_version_id"])))
+        except (TypeError, ValueError):
+            raise IncomingFileError("publication journal was invalid") from None
+        name = row["name"]
+        size = row["size"]
+        sha256 = row["sha256"]
+        spool_path = row["spool_path"]
+        if (
+            not _safe_name(name)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or not 1 <= size <= MAX_PUBLICATION_FILE_BYTES
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+            or not isinstance(spool_path, str)
+            or Path(spool_path).name != spool_path
+        ):
+            raise IncomingFileError("publication journal was invalid")
+        files.append(PublicationFile(source_version_id, name, size, sha256, spool_path))
+    manifest = PublicationManifest(publication_id, digest, tuple(files))
+    if _publication_digest(manifest.files) != digest:
+        raise IncomingFileError("publication journal was invalid")
+    return manifest
+
+
+def _write_publication_manifest(
+    path: Path, manifest: PublicationManifest, source_paths: Sequence[Path]
+) -> None:
+    value = {
+        "schema": _PUBLICATION_SCHEMA,
+        "publication_id": manifest.publication_id,
+        "source_paths": [item.as_posix() for item in source_paths],
+        "manifest_sha256": manifest.manifest_sha256,
+        "files": [
+            {**item.frozen_value(), "spool_path": item.spool_path}
+            for item in manifest.files
+        ],
+    }
+    _write_receipt(path, value)
+
+
+def _ledger_path(volume_root: Path) -> Path:
+    return volume_root / ".allies-publication-ledger.json"
+
+
+def _read_ledger(volume_root: Path) -> dict[str, dict[str, object]]:
+    path = _ledger_path(volume_root)
+    if not path.exists():
+        return {}
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+        raise IncomingFileError("publication reservation journal was invalid")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise IncomingFileError("publication reservation journal was invalid") from None
+    if not isinstance(value, Mapping) or value.get("schema") != _PUBLICATION_SCHEMA:
+        raise IncomingFileError("publication reservation journal was invalid")
+    records = value.get("records")
+    if not isinstance(records, Mapping):
+        raise IncomingFileError("publication reservation journal was invalid")
+    result: dict[str, dict[str, object]] = {}
+    for key, record in records.items():
+        if not isinstance(key, str) or not isinstance(record, Mapping):
+            raise IncomingFileError("publication reservation journal was invalid")
+        profile = record.get("profile")
+        size = record.get("size")
+        state = record.get("state")
+        if (
+            not isinstance(profile, str)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or state not in {"copying", "frozen"}
+        ):
+            raise IncomingFileError("publication reservation journal was invalid")
+        result[key] = {"profile": profile, "size": size, "state": state}
+    return result
+
+
+def _write_ledger(
+    volume_root: Path, records: Mapping[str, Mapping[str, object]]
+) -> None:
+    path = _ledger_path(volume_root)
+    _write_receipt(path, {"schema": _PUBLICATION_SCHEMA, "records": dict(records)})
+
+
+def _reserve_publication(
+    volume_root: Path, profile_key: str, publication_id: str, size: int
+) -> None:
+    _directory(volume_root)
+    records = _read_ledger(volume_root)
+    current = records.get(publication_id)
+    if current is not None:
+        if current.get("profile") == profile_key and current.get("size") == size:
+            return
+        raise IncomingFileError("publication reservation conflicted")
+    profile_records = [
+        record for record in records.values() if record["profile"] == profile_key
+    ]
+    if len(profile_records) >= MAX_PUBLICATION_MANIFESTS:
+        raise IncomingFileError("local storage capacity is unavailable")
+    if (
+        sum(record["state"] == "copying" for record in profile_records)
+        >= MAX_PUBLICATION_INCOMPLETE
+    ):
+        raise IncomingFileError("local storage capacity is unavailable")
+    if (
+        sum(int(record["size"]) for record in profile_records) + size
+        > MAX_PROFILE_PUBLICATION_BYTES
+    ):
+        raise IncomingFileError("local storage capacity is unavailable")
+    if (
+        sum(int(record["size"]) for record in records.values()) + size
+        > MAX_VOLUME_PUBLICATION_BYTES
+    ):
+        raise IncomingFileError("local storage capacity is unavailable")
+    if shutil.disk_usage(volume_root).free - size < MIN_VOLUME_FREE_BYTES:
+        raise IncomingFileError("local storage capacity is unavailable")
+    records[publication_id] = {"profile": profile_key, "size": size, "state": "copying"}
+    _write_ledger(volume_root, records)
+
+
+def _mark_publication_frozen(volume_root: Path, publication_id: str) -> None:
+    records = _read_ledger(volume_root)
+    record = records.get(publication_id)
+    if record is None:
+        raise IncomingFileError("publication reservation was unavailable")
+    record["state"] = "frozen"
+    _write_ledger(volume_root, records)
+
+
+def _release_publication(volume_root: Path, publication_id: str) -> None:
+    records = _read_ledger(volume_root)
+    if publication_id not in records:
+        return
+    del records[publication_id]
+    _write_ledger(volume_root, records)
+
+
 __all__ = [
     "MAX_CHUNK_BYTES",
     "IncomingFile",
+    "PublicationFile",
+    "PublicationManifest",
     "StagedFile",
     "StagedManifest",
+    "cleanup_profile_publication_spools",
+    "freeze_publication",
     "parse_incoming_files",
+    "publication_spool_path",
+    "release_publication_spool",
     "stage_incoming_files",
     "validate_hermes_file_context",
 ]

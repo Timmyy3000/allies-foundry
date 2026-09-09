@@ -5,10 +5,13 @@ import json
 from uuid import uuid4
 
 import pytest
-
 from allies_runtime.errors import IncomingFileError
 from allies_runtime.files import (
+    cleanup_profile_publication_spools,
+    freeze_publication,
     parse_incoming_files,
+    publication_spool_path,
+    release_publication_spool,
     stage_incoming_files,
     validate_hermes_file_context,
 )
@@ -111,6 +114,53 @@ def test_hermes_request_uses_a_structured_file_context():
     assert body == {"message": "", "allies_file_context": context}
 
 
+def test_publication_freezes_once_outside_the_model_workspace(tmp_path):
+    workspace = tmp_path / "profiles" / "ally" / "workspace"
+    workspace.mkdir(parents=True)
+    result = workspace / "result.csv"
+    result.write_bytes(b"name,value\nanswer,42\n")
+    publication_id = str(uuid4())
+
+    first = freeze_publication(workspace, publication_id, ["result.csv"])
+    result.write_bytes(b"edited working copy")
+    replay = freeze_publication(workspace, publication_id, ["result.csv"])
+    spool = publication_spool_path(
+        workspace, publication_id, first.files[0].source_version_id
+    )
+
+    assert replay == first
+    assert spool.read_bytes() == b"name,value\nanswer,42\n"
+    assert spool.is_relative_to(tmp_path / ".allies-publications" / "ally")
+    assert not spool.is_relative_to(workspace)
+
+    release_publication_spool(workspace, publication_id)
+    assert not spool.exists()
+
+
+def test_publication_rejects_links_and_profile_cleanup_is_scoped(tmp_path):
+    workspace = tmp_path / "profiles" / "ally" / "workspace"
+    workspace.mkdir(parents=True)
+    source = workspace / "result.csv"
+    source.write_bytes(b"ok")
+    sibling = tmp_path / "profiles" / "other" / "workspace"
+    sibling.mkdir(parents=True)
+    (sibling / "keep.txt").write_bytes(b"keep")
+    try:
+        (workspace / "linked.csv").symlink_to(source)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(IncomingFileError, match="unsafe"):
+        freeze_publication(workspace, str(uuid4()), ["linked.csv"])
+
+    publication_id = str(uuid4())
+    freeze_publication(workspace, publication_id, ["result.csv"])
+    cleanup_profile_publication_spools(tmp_path, "ally")
+
+    assert not (tmp_path / ".allies-publications" / "ally").exists()
+    assert (sibling / "keep.txt").read_bytes() == b"keep"
+
+
 @pytest.mark.asyncio
 async def test_worker_stages_files_before_it_invokes_hermes(tmp_path):
     workspace = tmp_path / "profile" / "workspace"
@@ -146,7 +196,9 @@ async def test_worker_stages_files_before_it_invokes_hermes(tmp_path):
     class Hermes:
         async def stream_profile_incremental(self, *_args, **kwargs):
             calls.append("hermes")
-            assert kwargs["file_context"]["files"][0]["file_id"] == descriptor["file_id"]
+            assert (
+                kwargs["file_context"]["files"][0]["file_id"] == descriptor["file_id"]
+            )
 
             async def events():
                 yield HermesEvent(

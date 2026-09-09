@@ -56,6 +56,11 @@ from runtime.services.profiles import (
     ensure_runtime_profile,
     list_profile_reconciliation,
 )
+from runtime.services.publications import (
+    acknowledge_frozen_publication,
+    create_publication_intent,
+    list_publication_intents,
+)
 from runtime.services.routines import (
     accept_routine_dispatch,
     append_runtime_routine_result,
@@ -79,6 +84,8 @@ from .schemas import (
     FailRequest,
     MaterializationReceiptRequest,
     ProfileProvisioningRequest,
+    PublicationFrozenRequest,
+    PublicationIntentRequest,
     RoutineSessionBindingRequest,
     RuntimeActivityWaitReceipt,
     RuntimeActivityWaitRequest,
@@ -216,6 +223,79 @@ def register(api: NinjaExtraAPI) -> None:
             response["Content-Length"] = str(content.content_length)
             response["Cache-Control"] = "no-store"
             return response
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.post("/runtime/attempts/{attempt_id}/file-publication-intents", auth=None)
+    def publication_intent(
+        request: HttpRequest,
+        attempt_id: UUID,
+        payload: PublicationIntentRequest,
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            receipt = create_publication_intent(
+                context,
+                attempt_id,
+                _lease_token(request),
+                payload.tool_call_id,
+                [item.model_dump(mode="json") for item in payload.files],
+            )
+            return JsonResponse(
+                {"publication_id": str(receipt.publication_id), "state": receipt.state},
+                status=200,
+            )
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.post(
+        "/runtime/profiles/{profile_id}/file-publication-intents/{publication_id}/frozen",
+        auth=None,
+    )
+    def frozen_publication_intent(
+        request: HttpRequest,
+        profile_id: UUID,
+        publication_id: UUID,
+        payload: PublicationFrozenRequest,
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            receipt = acknowledge_frozen_publication(
+                context,
+                profile_id,
+                publication_id,
+                [item.model_dump(mode="json") for item in payload.files],
+            )
+            return JsonResponse(
+                {"publication_id": str(receipt.publication_id), "state": receipt.state},
+                status=200,
+            )
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.get("/runtime/profiles/{profile_id}/file-publication-intents", auth=None)
+    def publication_intents(
+        request: HttpRequest,
+        profile_id: UUID,
+        limit: int = 20,
+        cursor: UUID | None = None,
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            page = list_publication_intents(context, profile_id, limit, cursor)
+            return JsonResponse(
+                {
+                    "items": [
+                        {
+                            "publication_id": str(item.publication_id),
+                            "state": item.state,
+                        }
+                        for item in page.items
+                    ],
+                    "next_cursor": str(page.next_cursor) if page.next_cursor else None,
+                },
+                status=200,
+            )
         except RuntimeDomainError as exc:
             return _error(exc)
 

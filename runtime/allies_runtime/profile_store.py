@@ -28,6 +28,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
+from .errors import IncomingFileError
+
 SKILLS_CATALOG = "/opt/allies/skills"
 SKILLS_CONFIG = f"skills:\n  external_dirs: [{json.dumps(SKILLS_CATALOG)}]\n"
 
@@ -2112,6 +2114,9 @@ class ProfileStore:
                     repair_code = "cleanup_bound_exceeded"
                 if repair_code is None:
                     try:
+                        from .files import cleanup_profile_publication_spools
+
+                        cleanup_profile_publication_spools(self.volume_root, key)
                         self._remove_owned_path(profile, parent=profiles_root)
                         temp_siblings = self._find_temp_siblings(profiles_root, key)
                         if temp_siblings is None:
@@ -2119,7 +2124,7 @@ class ProfileStore:
                         else:
                             for sibling in temp_siblings:
                                 self._remove_owned_path(sibling, parent=profiles_root)
-                    except ProfileStoreError:
+                    except (IncomingFileError, ProfileStoreError, OSError):
                         repair_code = "profile_cleanup_failed"
 
                 if repair_code is not None:
