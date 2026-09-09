@@ -497,6 +497,8 @@ def _post_to_cloud(envelope_bytes: bytes) -> tuple[int, str]:
     expected_event_id = None
     try:
         decoded = json.loads(envelope_bytes.decode("utf-8"))
+        if not isinstance(decoded, dict):
+            return 503, "delivery_envelope_invalid"
         if decoded.get("kind") in {"routine.result", "routine.approval_requested"}:
             event = parse_routine_message(decoded)
             expected_event_id = event.event_id

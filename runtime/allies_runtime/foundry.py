@@ -108,10 +108,10 @@ def _routine_references(value: Any) -> list[dict[str, str]]:
         url = reference.get("url")
         if (
             not isinstance(label, str)
-            or not 1 <= len(label) <= 255
+            or not 1 <= len(label.encode("utf-8")) <= 255
             or "\x00" in label
             or not isinstance(url, str)
-            or not 1 <= len(url) <= 2048
+            or not 1 <= len(url.encode("utf-8")) <= 2048
             or "\x00" in url
             or not url.startswith(("http://", "https://"))
         ):

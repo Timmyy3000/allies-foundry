@@ -19,6 +19,7 @@ from allies_runtime.foundry import (
     SessionReceipt,
     StoppedReceipt,
     TerminalReceipt,
+    _routine_references,
 )
 from allies_runtime.hermes import (
     MAX_MESSAGE_BYTES,
@@ -324,6 +325,23 @@ async def test_routine_claim_turns_malformed_references_into_a_failed_result():
     assert result.status == "failed"
     assert foundry.failures == []
     assert foundry.routine_results[0]["outcome"] == "failed"
+
+
+def test_routine_reference_limits_are_measured_in_utf8_bytes():
+    accepted = _routine_references(
+        [{"label": "界" * 85, "url": "https://example.test/"}]
+    )
+    assert accepted[0]["label"] == "界" * 85
+
+    with pytest.raises(HermesMalformedResponse):
+        _routine_references(
+            [{"label": "界" * 86, "url": "https://example.test/"}]
+        )
+
+    with pytest.raises(HermesMalformedResponse):
+        _routine_references(
+            [{"label": "source", "url": "https://example.test/" + "界" * 683}]
+        )
 
 
 @pytest.mark.asyncio

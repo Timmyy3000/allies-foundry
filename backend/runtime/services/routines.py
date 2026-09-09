@@ -335,9 +335,18 @@ def _decide_routine_approval_once(
                 "updated_at",
             ]
         )
+        result_event = _record_terminal_failure_result(
+            routine,
+            text="Routine approval was rejected before execution.",
+            observed_at=observed_at,
+        )
         routine.fence += 1
         routine.status = RoutineRunStatus.CANCELLED
-        routine.terminal_receipt = {"code": "APPROVAL_REJECTED", "fence": routine.fence}
+        routine.terminal_receipt = {
+            "code": "APPROVAL_REJECTED",
+            "fence": routine.fence,
+            "result_event_id": str(result_event.event_id),
+        }
         routine.save(update_fields=["fence", "status", "terminal_receipt", "updated_at"])
         routine.execution.status = ExecutionStatus.CANCELLED
         routine.execution.save(update_fields=["status", "updated_at"])
@@ -652,12 +661,18 @@ def _cancel_routine_wait_once(
     action.permission_consumed = True
     action.decision = "cancel"
     action.save(update_fields=["status", "permission_consumed", "decision", "updated_at"])
+    result_event = _record_terminal_failure_result(
+        routine,
+        text="Routine wait was cancelled before execution.",
+        observed_at=observed_at,
+    )
     routine.fence += 1
     routine.status = RoutineRunStatus.CANCELLED
     routine.terminal_receipt = {
         "code": "WAIT_CANCELLED",
         "fence": routine.fence,
         "replacing_occurrence_id": str(command.replacing_occurrence_id),
+        "result_event_id": str(result_event.event_id),
     }
     routine.save(update_fields=["fence", "status", "terminal_receipt", "updated_at"])
     routine.execution.status = ExecutionStatus.CANCELLED
@@ -975,6 +990,26 @@ def _record_routine_result_once(
     return event
 
 
+def _record_terminal_failure_result(
+    routine: RoutineExecution,
+    *,
+    text: str,
+    observed_at: datetime,
+) -> ExecutionEvent:
+    """Emit a failure before a caller applies a specific terminal state."""
+
+    return _record_routine_result_once(
+        routine.id,
+        outcome="failed",
+        text=text,
+        references=[],
+        delayed=None,
+        event_id=uuid4(),
+        event_sequence=None,
+        observed_at=observed_at,
+    )
+
+
 def _expire_action_locked(
     routine: RoutineExecution,
     action: RoutineApprovalAction,
@@ -986,9 +1021,26 @@ def _expire_action_locked(
     action.permission_consumed = False
     action.action_state = RoutineActionState.PRE_DISPATCH
     action.save(update_fields=["status", "permission_consumed", "action_state", "updated_at"])
+    result_event = (
+        _record_terminal_failure_result(
+            routine,
+            text="Routine approval expired before execution.",
+            observed_at=observed_at,
+        )
+        if attempt is not None
+        else None
+    )
     routine.fence += 1
     routine.status = RoutineRunStatus.EXPIRED
-    routine.terminal_receipt = {"code": "APPROVAL_EXPIRED", "fence": routine.fence}
+    routine.terminal_receipt = {
+        "code": "APPROVAL_EXPIRED",
+        "fence": routine.fence,
+        **(
+            {"result_event_id": str(result_event.event_id)}
+            if result_event is not None
+            else {}
+        ),
+    }
     routine.save(update_fields=["fence", "status", "terminal_receipt", "updated_at"])
     routine.execution.status = ExecutionStatus.FAILED
     routine.execution.save(update_fields=["status", "updated_at"])

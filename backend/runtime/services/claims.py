@@ -494,6 +494,15 @@ def _reconcile_expired_lease(
             from .events import _append_lease_expired_failure
 
             _append_lease_expired_failure(attempt, lease)
+        routine_result_event = None
+        if routine is not None:
+            from .routines import _record_terminal_failure_result
+
+            routine_result_event = _record_terminal_failure_result(
+                routine,
+                text="Routine lease expired before completion.",
+                observed_at=now,
+            )
         attempt.status = AttemptStatus.UNKNOWN
         attempt.save(update_fields=["status", "updated_at"])
         execution = attempt.execution
@@ -504,13 +513,17 @@ def _reconcile_expired_lease(
         }:
             execution.status = ExecutionStatus.FAILED
             execution.save(update_fields=["status", "updated_at"])
-        if routine is not None and routine.status not in {
-            RoutineRunStatus.SUCCEEDED,
-            RoutineRunStatus.CANCELLED,
-            RoutineRunStatus.EXPIRED,
-        }:
+        if routine is not None:
             routine.status = RoutineRunStatus.FAILED
-            routine.terminal_receipt = {"code": "LEASE_EXPIRED"}
+            routine.terminal_receipt = {
+                **(routine.terminal_receipt or {}),
+                "code": "LEASE_EXPIRED",
+                **(
+                    {"result_event_id": str(routine_result_event.event_id)}
+                    if routine_result_event is not None
+                    else {}
+                ),
+            }
             routine.save(update_fields=["status", "terminal_receipt", "updated_at"])
 
     from .approvals import cancel_live_approval_requests

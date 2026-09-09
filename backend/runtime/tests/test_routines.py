@@ -675,6 +675,46 @@ def test_routine_approval_endpoint_replays_and_fences_changed_idempotency(
     assert conflict.json()["code"] == "IDEMPOTENCY_CONFLICT"
 
 
+def test_rejected_routine_emits_a_failed_result_before_terminalizing(
+    routine_context,
+):
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+    request_routine_approval(
+        routine.id,
+        action_attempt_id=uuid4(),
+        approval_request_id=uuid4(),
+        action_digest="c" * 64,
+        provider_idempotency_key="provider-action-reject",
+        continuation={"tool": "example"},
+        event_sequence=1,
+        now=state["base"],
+    )
+    action = RoutineApprovalAction.objects.get(routine_execution=routine)
+    decision = RoutineApprovalDecision.model_validate(
+        approval_decision_payload(state, routine, action, decision="reject")
+    )
+
+    receipt = decide_routine_approval(
+        decision,
+        now=state["base"] + timedelta(minutes=1),
+    )
+
+    assert receipt.result_code == "APPROVAL_REJECTED"
+    routine.refresh_from_db()
+    assert routine.status == RoutineRunStatus.CANCELLED
+    assert routine.current_attempt.status == AttemptStatus.CANCELLED
+    event = ExecutionEvent.objects.get(
+        attempt_id=routine.current_attempt_id,
+        event_type="routine.result",
+    )
+    assert event.payload["outcome"] == "failed"
+    assert event.payload["text"] == "Routine approval was rejected before execution."
+    assert routine.terminal_receipt["result_event_id"] == str(event.event_id)
+
+
 def test_routine_cancel_wait_endpoint_returns_the_existing_fence_receipt(
     routine_context, settings
 ):
@@ -721,6 +761,12 @@ def test_routine_cancel_wait_endpoint_returns_the_existing_fence_receipt(
     assert conflict.json()["code"] == "IDEMPOTENCY_CONFLICT"
     routine.refresh_from_db()
     assert routine.status == RoutineRunStatus.CANCELLED
+    event = ExecutionEvent.objects.get(
+        attempt_id=routine.current_attempt_id,
+        event_type="routine.result",
+    )
+    assert event.payload["outcome"] == "failed"
+    assert event.payload["text"] == "Routine wait was cancelled before execution."
 
 
 def test_same_profile_routines_have_distinct_leases_and_sessions(routine_context):
@@ -944,6 +990,13 @@ def test_expiry_fences_waiting_routine_without_a_decision_receipt(routine_contex
     assert routine.status == RoutineRunStatus.EXPIRED
     assert action.status == RoutineApprovalStatus.EXPIRED
     assert routine.current_attempt.status == AttemptStatus.FAILED
+    event = ExecutionEvent.objects.get(
+        attempt_id=routine.current_attempt_id,
+        event_type="routine.result",
+    )
+    assert event.payload["outcome"] == "failed"
+    assert event.payload["text"] == "Routine approval expired before execution."
+    assert routine.terminal_receipt["result_event_id"] == str(event.event_id)
 
 
 def test_expired_routine_lease_reuses_one_lease_with_a_new_acquisition(routine_context):
@@ -997,3 +1050,10 @@ def test_expired_routine_after_session_bind_is_fenced_not_redispatched(routine_c
     routine.refresh_from_db()
     assert routine.status == RoutineRunStatus.FAILED
     assert routine.current_attempt.status == AttemptStatus.UNKNOWN
+    event = ExecutionEvent.objects.get(
+        attempt_id=routine.current_attempt_id,
+        event_type="routine.result",
+    )
+    assert event.payload["outcome"] == "failed"
+    assert event.payload["text"] == "Routine lease expired before completion."
+    assert routine.terminal_receipt["result_event_id"] == str(event.event_id)
