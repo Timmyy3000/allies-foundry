@@ -475,6 +475,50 @@ def test_run_probe_preserves_setup_after_probe_timeout(monkeypatch, tmp_path):
     assert report["reason"] == "probe_timeout"
 
 
+def test_run_probe_exec_budget_covers_sequential_service_stages(
+    monkeypatch, tmp_path
+):
+    calls = []
+    runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(LAUNCH, "_wait_for_readiness", lambda *args: True)
+    observed_timeout = None
+
+    def bounded_probe_runner(command, **kwargs):
+        nonlocal observed_timeout
+        calls.append(command)
+        if command[1:2] == ["exec"]:
+            observed_timeout = kwargs["timeout"]
+            return CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "mode": "service",
+                        "status": "CAPABILITY_PASSED",
+                        "checks": [
+                            {"name": name, "status": "pass"}
+                            for name in LAUNCH.CLASS_B_REQUIRED_CHECKS
+                        ],
+                    }
+                ),
+                stderr="",
+            )
+        return runner(command, **kwargs)
+
+    report = LAUNCH.run_probe(
+        image="allies/hermes@sha256:" + "a" * 64,
+        credential_ref="vault://cld012/hermes",
+        model_profile_ref="vault://cld012/model",
+        setup_timeout_seconds=1,
+        probe_timeout_seconds=1,
+        runner=bounded_probe_runner,
+    )
+
+    assert report["status"] == "CAPABILITY_PASSED"
+    assert observed_timeout == LAUNCH._probe_execution_timeout(1)
+    assert observed_timeout > 1 + 5
+
+
 @pytest.mark.parametrize(
     ("timed_out_command", "cleanup_command"),
     [

@@ -32,6 +32,11 @@ if str(RUNTIME_ROOT) not in sys.path:
 MODEL = os.environ.get("CLD012_MODEL", "gpt-5.6-luna")
 SOURCE_COMMIT = "36cb5ae5530a75def7df3195e49b7a4aa2add482"
 MAX_TIMEOUT_SECONDS = 60.0
+HERMES_REQUEST_TIMEOUT_SECONDS = 30.0
+HERMES_STREAM_TIMEOUT_SECONDS = 30.0
+PROBE_STAGE_COUNT = 4
+PROBE_REQUEST_BUDGET_COUNT = 12
+PROBE_EXECUTION_SLACK_SECONDS = 5.0
 IMAGE_DIGEST = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$", re.IGNORECASE)
 MAX_REFERENCE_BYTES = 256
 MAX_CREDENTIAL_REQUEST_BYTES = MAX_REFERENCE_BYTES + 1
@@ -91,6 +96,24 @@ def _run(runner: Runner, command: Sequence[str], timeout: float) -> CompletedPro
         check=False,
         text=True,
         timeout=timeout,
+    )
+
+
+def _probe_execution_timeout(timeout_seconds: float) -> float:
+    """Budget the launcher for the probe's sequential service stages.
+
+    The service probe has four bounded stream stages (readiness, preflight,
+    concurrent turns, and fresh-session recall) plus twelve bounded request
+    calls (including the six history checks).  Keep the outer Docker exec
+    timeout above that aggregate so a valid late-stage report is not rewritten
+    as a launcher timeout.
+    """
+
+    stage_budget = max(timeout_seconds, HERMES_STREAM_TIMEOUT_SECONDS)
+    return (
+        (PROBE_STAGE_COUNT * stage_budget)
+        + (PROBE_REQUEST_BUDGET_COUNT * HERMES_REQUEST_TIMEOUT_SECONDS)
+        + PROBE_EXECUTION_SLACK_SECONDS
     )
 
 
@@ -352,9 +375,9 @@ def build_run_command(
         "--env",
         "HERMES_ORIGIN=http://127.0.0.1:8642",
         "--env",
-        "HERMES_REQUEST_TIMEOUT=30",
+        f"HERMES_REQUEST_TIMEOUT={int(HERMES_REQUEST_TIMEOUT_SECONDS)}",
         "--env",
-        "HERMES_STREAM_TIMEOUT=30",
+        f"HERMES_STREAM_TIMEOUT={int(HERMES_STREAM_TIMEOUT_SECONDS)}",
         "--env",
         f"CLD012_MODEL={MODEL}",
         "--env",
@@ -793,7 +816,7 @@ def run_probe(
                     probe = _run(
                         runner,
                         _probe_command(container_name, probe_timeout_seconds),
-                        probe_timeout_seconds + 5,
+                        _probe_execution_timeout(probe_timeout_seconds),
                     )
                 except subprocess.TimeoutExpired:
                     report.update(
