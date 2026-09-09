@@ -67,6 +67,12 @@ FIXTURE_PATH = (
 FILE_INPUT_FIXTURE_PATH = (
     Path(__file__).resolve().parents[3] / "docs" / "contracts" / "file-input-v1.json"
 )
+FILE_INPUT_COMMAND_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "docs"
+    / "contracts"
+    / "foundry-execution-file-input-v1.json"
+)
 ACTIVITY_FIXTURE_PATH = (
     Path(__file__).resolve().parents[3]
     / "docs"
@@ -267,6 +273,14 @@ def test_file_input_contract_keeps_legacy_bytes_and_survives_claim(binding, cont
     )
     assert claim is not None
     assert claim.payload["files"] == file_input["files"]
+
+
+def test_file_input_commands_match_golden_fingerprints():
+    contract = json.loads(FILE_INPUT_COMMAND_FIXTURE_PATH.read_text(encoding="utf-8"))
+    for command_data in contract["commands"].values():
+        command = ExecutionCommand.model_validate(command_data)
+        validate_command(command)
+        assert command_fingerprint(command) == command_data["fingerprint"]
 
 
 def _file_input(size: int, suffix: str) -> dict:
