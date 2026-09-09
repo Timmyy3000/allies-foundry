@@ -8,7 +8,7 @@ import os
 import shutil
 import time
 import unicodedata
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -68,7 +68,7 @@ class StagedManifest:
         }
 
 
-FileFetcher = Callable[[IncomingFile], AsyncIterator[bytes] | Awaitable[AsyncIterator[bytes]]]
+FileFetcher = Callable[[IncomingFile], AsyncIterator[bytes]]
 
 
 def parse_incoming_files(value: object) -> tuple[IncomingFile, ...]:
@@ -235,8 +235,6 @@ async def _download_file(
     received = 0
     digest = hashlib.sha256()
     source = fetch(descriptor)
-    if hasattr(source, "__await__"):
-        source = await source
     if not hasattr(source, "__aiter__"):
         raise IncomingFileError("incoming file transport was invalid")
     try:

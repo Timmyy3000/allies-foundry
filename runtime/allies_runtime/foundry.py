@@ -882,22 +882,11 @@ class FoundryClient:
             raise _error_for(status, payload)
         response = raw.get("response") if isinstance(raw, Mapping) else None
         if response is None:
-            chunks = raw.get("chunks") if isinstance(raw, Mapping) else None
-            if not isinstance(chunks, (list, tuple)):
-                raise FoundryError(
-                    "Foundry file response was malformed",
-                    status=200,
-                    code="MALFORMED_RESPONSE",
-                )
-            for chunk in chunks:
-                if not isinstance(chunk, bytes) or not chunk or len(chunk) > 64 * 1024:
-                    raise FoundryError(
-                        "Foundry file response was malformed",
-                        status=200,
-                        code="MALFORMED_RESPONSE",
-                    )
-                yield chunk
-            return
+            raise FoundryError(
+                "Foundry file response was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
         try:
             while True:
                 chunk = await asyncio.to_thread(response.read, 64 * 1024)

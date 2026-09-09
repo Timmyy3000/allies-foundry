@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request, build_opener
 from uuid import UUID
 
 from django.conf import settings
@@ -23,18 +23,13 @@ from runtime.exceptions import (
 )
 from runtime.models import Attempt, Lease, LeaseState
 
-from .event_delivery import _validated_cloud_url
+from .event_delivery import _NoRedirect, _validated_cloud_url
 from .profiles import profile_allows_runtime_write
 from .runtime_auth import RuntimeContext
 from .validation import digest_lease_token
 
 MAX_FILE_CHUNK_BYTES = 64 * 1024
 FILE_CONTENT_PATH = "/api/v1/internal/v1/accepted-files/{file_id}/content"
-
-
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 @dataclass(frozen=True, slots=True)
