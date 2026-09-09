@@ -470,7 +470,7 @@ def test_run_probe_preserves_setup_after_probe_timeout(monkeypatch, tmp_path):
 
     assert report["setup"] == "passed"
     assert report["readiness"] == "passed"
-    assert report["model_preflight"] == "failed"
+    assert report["model_preflight"] == "pending"
     assert report["status"] == "SETUP_BLOCKED"
     assert report["reason"] == "probe_timeout"
 

@@ -798,7 +798,6 @@ def run_probe(
                 except subprocess.TimeoutExpired:
                     report.update(
                         status="SETUP_BLOCKED",
-                        model_preflight="failed",
                         reason="probe_timeout",
                     )
                 else:
