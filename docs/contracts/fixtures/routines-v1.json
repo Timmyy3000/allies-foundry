@@ -2,7 +2,7 @@
   "contract": {
     "contract_name": "routines",
     "schema_version": "v1",
-    "content_revision": 9,
+    "content_revision": 14,
     "normative_owner": "cloud",
     "compatibility_vendor": "foundry",
     "document_path": "docs/contracts/routines-v1.md",
@@ -657,6 +657,13 @@
       "schedule_generation": 4,
       "occurrence_id": "00000000-0000-4000-8000-000000000005",
       "run_id": "00000000-0000-4000-8000-000000000006",
+      "schedule": {
+        "kind": "recurring",
+        "frequency": "weekly",
+        "local_time": "10:00:00",
+        "days_of_week": [1, 3, 5],
+        "timezone": "Europe/Berlin"
+      },
       "scheduled_at": "2026-09-11T08:00:00Z",
       "delayed": false,
       "occurrence_disposition": "admitted",
@@ -674,13 +681,13 @@
       },
       "issued_at": "2026-09-11T08:00:01Z",
       "deadline_at": "2026-09-11T08:01:01Z",
-      "fingerprint": "canonical-json-sha256:v1:24b8865729dce5ed65dfca8f6394fbd5708d0d4e157c2ae0333106493c52d210"
+      "fingerprint": "canonical-json-sha256:v1:b9eecb5fb63dda937a101dcf7dcbaf37bf5b8ee805c9df9772940940142d0257"
     },
     "receipt": {
       "schema_version": "v1",
       "kind": "routine.dispatch_receipt",
       "producer": "foundry",
-      "service_identity": "foundry-runtime",
+      "service_identity": "foundry-service",
       "command_id": "00000000-0000-4000-8000-00000000001e",
       "idempotency_key": "00000000-0000-4000-8000-00000000001f",
       "outcome": "accepted",
@@ -699,7 +706,7 @@
       },
       "issued_at": "2026-09-11T08:00:02Z",
       "deadline_at": "2026-09-11T08:01:02Z",
-      "fingerprint": "canonical-json-sha256:v1:c2a8dc0ad03beb62e1003a4e3a8af87395f75244ee6064daf871b851c22c2bb2"
+      "fingerprint": "canonical-json-sha256:v1:4be5c9889cdca4547fb289df58fb29f03b12a0b303a70613ad5c6f77e2266284"
     }
   },
   "result": {
@@ -707,7 +714,7 @@
       "schema_version": "v1",
       "kind": "routine.result",
       "producer": "foundry",
-      "service_identity": "foundry-runtime",
+      "service_identity": "foundry-service",
       "event_id": "00000000-0000-4000-8000-00000000001d",
       "event_sequence": 3,
       "routine_id": "00000000-0000-4000-8000-000000000004",
@@ -735,7 +742,7 @@
         "ally_id": "00000000-0000-4000-8000-000000000003",
         "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
       },
-      "fingerprint": "canonical-json-sha256:v1:72f21139e340a0fc141dbe9cf52a1360faaf537f6e23f770b1b9437f55b3c898"
+      "fingerprint": "canonical-json-sha256:v1:dfffed448702283fef237e6affa9de74a4dc6dc088c7f3a395023e95c98efd37"
     },
     "receipt": {
       "schema_version": "v1",
@@ -766,7 +773,7 @@
       "schema_version": "v1",
       "kind": "routine.approval_requested",
       "producer": "foundry",
-      "service_identity": "foundry-runtime",
+      "service_identity": "foundry-service",
       "event_id": "00000000-0000-4000-8000-000000000024",
       "event_sequence": 2,
       "approval_request_id": "00000000-0000-4000-8000-00000000000c",
@@ -789,7 +796,7 @@
       },
       "issued_at": "2026-09-11T08:03:00Z",
       "deadline_at": "2026-09-11T08:04:00Z",
-      "fingerprint": "canonical-json-sha256:v1:7c7a519a96396e5e135e09bdeaa92ca708dc16c53af7fc1a6244c1b00f26eb98"
+      "fingerprint": "canonical-json-sha256:v1:29c5c627cdc49a9e647bae066e6d3d992ad191452fa7726565ba8ba43e416589"
     },
     "decision": {
       "schema_version": "v1",
@@ -820,7 +827,7 @@
       "schema_version": "v1",
       "kind": "routine.approval_receipt",
       "producer": "foundry",
-      "service_identity": "foundry-runtime",
+      "service_identity": "foundry-service",
       "command_id": "00000000-0000-4000-8000-000000000020",
       "idempotency_key": "00000000-0000-4000-8000-000000000021",
       "result_code": "APPROVAL_AUTHORIZED",
@@ -837,7 +844,7 @@
       },
       "issued_at": "2026-09-11T08:04:01Z",
       "deadline_at": "2026-09-11T08:05:01Z",
-      "fingerprint": "canonical-json-sha256:v1:ac07067a89875bd91d63f9c27849cb1aa2f1f33d40170b41c40f4e93c08448fd"
+      "fingerprint": "canonical-json-sha256:v1:caa37f02198926e0ce239a69493d8be6ccbc094bd3f9d471be8c663974dbd579"
     },
     "cancel_wait": {
       "schema_version": "v1",
@@ -954,6 +961,7 @@
     {"code": "STALE_GENERATION", "enforcing_owner": "FND-012", "terminal": true, "retry": "fenced"},
     {"code": "IDEMPOTENCY_CONFLICT", "enforcing_owner": "FND-012", "terminal": false, "retry": "do_not_replay"},
     {"code": "ACTION_OUTCOME_UNKNOWN", "enforcing_owner": "FND-012", "terminal": true, "retry": "read_only_reconcile"},
+    {"code": "ACTION_MANUAL_RECONCILIATION", "enforcing_owner": "FND-012", "terminal": true, "retry": "human_reconciliation"},
     {"code": "REPLACEMENT_PENDING", "enforcing_owner": "integration", "terminal": false, "retry": "wait_for_fencing_receipt"},
     {"code": "RESULT_INSERTED_ONCE", "enforcing_owner": "integration", "terminal": true, "retry": "dedupe_watermark"}
   ],
@@ -961,7 +969,7 @@
     {"case_id": "race-delete-due", "requirement": "delete versus due admission", "preconditions": ["routine active", "candidate due"], "actions": ["delete", "admit"], "expected_result_code": "ROUTINE_DELETED", "expected_postcondition": "zero occurrence and outbox when delete commits first", "enforcing_owner": "CLD-013"},
     {"case_id": "race-pause-due", "requirement": "pause versus due admission", "preconditions": ["recurring active", "candidate due"], "actions": ["pause", "admit"], "expected_result_code": "ROUTINE_PAUSED", "expected_postcondition": "no paused-interval catch-up", "enforcing_owner": "CLD-013"},
     {"case_id": "race-update-due", "requirement": "update versus due admission", "preconditions": ["candidate has revision 1"], "actions": ["update to revision 2", "admit revision 1"], "expected_result_code": "STALE_DUE_CANDIDATE", "expected_postcondition": "zero writes for stale candidate", "enforcing_owner": "CLD-013"},
-    {"case_id": "race-resume-due", "requirement": "resume versus paused candidate", "preconditions": ["routine paused", "candidate generation 1"], "actions": ["resume to generation 2", "admit generation 1"], "expected_result_code": "STALE_DUE_CANDIDATE", "expected_postcondition": "old paused occurrence is never replayed", "enforcing_owner": "CLD-013"},
+    {"case_id": "race-resume-due", "requirement": "resume versus paused candidate", "preconditions": ["routine paused after effective pause at generation 3", "candidate generation 3"], "actions": ["resume to generation 4", "admit generation 3"], "expected_result_code": "STALE_DUE_CANDIDATE", "expected_postcondition": "old paused occurrence is never replayed", "enforcing_owner": "CLD-013"},
     {"case_id": "race-duplicate-admission", "requirement": "two scheduler claims", "preconditions": ["same routine and scheduled instant"], "actions": ["admit A", "admit B"], "expected_result_code": "OCCURRENCE_REPLAY", "expected_postcondition": "one occurrence and one outbox", "enforcing_owner": "CLD-013"},
     {"case_id": "race-approval-cancel", "requirement": "approval versus replacement cancellation", "preconditions": ["approval waiting", "same generation"], "actions": ["approve", "cancel_wait"], "expected_result_code": "APPROVAL_ALREADY_AUTHORIZING", "expected_postcondition": "one winner; replacement waits or skips", "enforcing_owner": "FND-012"},
     {"case_id": "race-expiry-equality", "requirement": "approval at expiry equality", "preconditions": ["database now equals expires_at"], "actions": ["approve"], "expected_result_code": "APPROVAL_EXPIRED", "expected_postcondition": "permission invalidated and no action", "enforcing_owner": "FND-012"},
@@ -988,14 +996,14 @@
     {"case_id": "schedule-dst-fold", "requirement": "DST fold handling", "input": "schedule.dst_fold", "preconditions": ["IANA timezone"], "actions": ["resolve local time"], "expected_result_code": "OCCURRENCE_ADMITTED", "expected_postcondition": "earliest instant runs once", "enforcing_owner": "CLD-013"},
     {"case_id": "schedule-missed", "requirement": "latest missed recovery", "input": "schedule.recovery", "preconditions": ["sleeping machine"], "actions": ["recover latest"], "expected_result_code": "OCCURRENCE_ADMITTED", "expected_postcondition": "one visibly delayed recovery", "enforcing_owner": "CLD-013"},
     {"case_id": "dispatch-snapshot", "requirement": "immutable run snapshot", "input": "dispatch.command", "preconditions": ["admission committed"], "actions": ["send dispatch"], "expected_result_code": "OCCURRENCE_ADMITTED", "expected_postcondition": "run conversation is fresh and prompt is complete", "enforcing_owner": "CLD-013"},
-    {"case_id": "dispatch-retry", "requirement": "occurrence retry identity", "input": "dispatch.receipt", "preconditions": ["transport timeout"], "actions": ["reconcile same key"], "expected_result_code": "OCCURRENCE_REPLAY", "expected_postcondition": "no second occurrence", "enforcing_owner": "FND-012"},
+    {"case_id": "dispatch-retry", "requirement": "occurrence retry identity", "input": "dispatch.receipt", "preconditions": ["transport timeout"], "actions": ["reconcile same key"], "expected_result_code": "OCCURRENCE_REPLAY", "expected_postcondition": "no second occurrence", "enforcing_owner": "CLD-013"},
     {"case_id": "result-unchanged", "requirement": "unchanged result delivery", "input": "result.event", "preconditions": ["run terminal"], "actions": ["ingest and insert"], "expected_result_code": "RESULT_INSERTED_ONCE", "expected_postcondition": "attributed unchanged result in main history", "enforcing_owner": "integration"},
     {"case_id": "result-deleted-routine", "requirement": "preserve result after deletion", "input": "result.event", "preconditions": ["routine deleted after admission"], "actions": ["deliver result"], "expected_result_code": "RESULT_INSERTED_ONCE", "expected_postcondition": "result remains durable", "enforcing_owner": "integration"},
     {"case_id": "approval-authorize", "requirement": "atomic approval CAS", "input": "approval.decision", "preconditions": ["pending and before expiry"], "actions": ["lock and consume permission"], "expected_result_code": "APPROVAL_AUTHORIZED", "expected_postcondition": "working run with one action identity", "enforcing_owner": "FND-012"},
     {"case_id": "approval-reject", "requirement": "rejection prevents action", "input": "approval.decision", "preconditions": ["pending"], "actions": ["reject"], "expected_result_code": "APPROVAL_REJECTED", "expected_postcondition": "terminal cancellation and main outcome", "enforcing_owner": "FND-012"},
     {"case_id": "approval-expire", "requirement": "database-clock expiry", "input": "approval.requested", "preconditions": ["now at or after expires_at"], "actions": ["expire"], "expected_result_code": "APPROVAL_EXPIRED", "expected_postcondition": "no later approval can authorize", "enforcing_owner": "FND-012"},
     {"case_id": "approval-action-unknown", "requirement": "no unsafe replay", "input": "approval.crash_vectors", "preconditions": ["response lost"], "actions": ["mark unknown", "read-only reconcile"], "expected_result_code": "ACTION_OUTCOME_UNKNOWN", "expected_postcondition": "manual reconciliation if unresolved", "enforcing_owner": "FND-012"},
-    {"case_id": "lifecycle-terminal", "requirement": "terminal monotonicity", "input": "lifecycle.transitions", "preconditions": ["run working"], "actions": ["complete or fail"], "expected_result_code": "ACTION_MANUAL_RECONCILIATION", "expected_postcondition": "terminal state never reopens", "enforcing_owner": "FND-012"},
+    {"case_id": "lifecycle-terminal", "requirement": "manual reconciliation preserves terminal monotonicity", "input": "approval.crash_vectors", "preconditions": ["action attempt is unknown after ambiguous external outcome"], "actions": ["transition unknown to manual_reconciliation", "stop automatic processing"], "expected_result_code": "ACTION_MANUAL_RECONCILIATION", "expected_postcondition": "action attempt reaches manual_reconciliation; automatic processing stops and any later human reconciliation never reopens the terminal run", "enforcing_owner": "FND-012"},
     {"case_id": "correlation-fence", "requirement": "immutable identity tuple", "input": "correlation.required_dispatch", "preconditions": ["all IDs present"], "actions": ["compare"], "expected_result_code": "CORRELATION_MISMATCH", "expected_postcondition": "changed identity makes zero state change", "enforcing_owner": "FND-012"},
     {"case_id": "idempotency-conflict", "requirement": "changed replay conflicts", "input": "idempotency.same_key_changed_fingerprint", "preconditions": ["stored receipt"], "actions": ["replay changed body"], "expected_result_code": "IDEMPOTENCY_CONFLICT", "expected_postcondition": "no duplicate side effect", "enforcing_owner": "FND-012"},
     {"case_id": "revision-stale", "requirement": "stale management mutation", "input": "revision.management", "preconditions": ["expected revision old; current revision newer"], "actions": ["CAS mutation"], "expected_result_code": "REVISION_CONFLICT", "expected_postcondition": "zero-write rejection with no saved management receipt", "enforcing_owner": "CLD-013"},

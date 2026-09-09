@@ -18,9 +18,9 @@ def fixture() -> dict:
 
 def test_released_contract_tuple_is_byte_stable():
     expected = {
-        "routines-v1.md": "891a9eb9932be9e7826baaf313ded7c6fd4f8526a661e0be5a83b6118fee76de",
-        "fixtures/routines-v1.json": "259577de2ea7e8343b266995767496d359aef196f1a19d6841e67ef133fb3343",
-        "routines-v1.lock.json": "a9dbd56d70bc8e63c74988a85e2121527ab54d398d04c086538fc2f3e4f107de",
+        "routines-v1.md": "f05ab0a1baf63551f426c288f0144484c813b5cda535bf1cf5d614fb7a22ea84",
+        "fixtures/routines-v1.json": "2660d30ee73e8f3cebf94340ea1169019e3c937fd01a30bff6d0e16ecd54ab35",
+        "routines-v1.lock.json": "9005d25a8186d325a2efdcc42ec9e6cfe4d2d6c445088c9ba7a6b4d87429cb04",
     }
     for relative, digest in expected.items():
         assert hashlib.sha256((CONTRACT_ROOT / relative).read_bytes()).hexdigest() == digest
@@ -53,9 +53,9 @@ def test_result_preserves_dispatch_title_and_revision_snapshot():
     assert result.title_snapshot == dispatch.title_snapshot
 
 
-def test_revision9_schedule_and_identity_vectors_are_explicit():
+def test_revision14_schedule_and_identity_vectors_are_explicit():
     released = fixture()
-    assert released["contract"]["content_revision"] == 9
+    assert released["contract"]["content_revision"] == 14
     assert [
         released["management"][operation]["receipt"]["schedule_generation"]
         for operation in ("create", "update", "pause", "resume")
@@ -69,6 +69,13 @@ def test_revision9_schedule_and_identity_vectors_are_explicit():
     ]
     assert required_dispatch.isdisjoint(
         released["correlation"]["required_dispatch_receipt"]
+    )
+    assert released["dispatch"]["command"]["schedule"]["timezone"] == "Europe/Berlin"
+    assert all(
+        message["service_identity"] == "foundry-service"
+        for section in ("result", "approval")
+        for name, message in released[section].items()
+        if isinstance(message, dict) and message.get("producer") == "foundry"
     )
 
     constraint_cases = [

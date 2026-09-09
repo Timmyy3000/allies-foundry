@@ -155,6 +155,12 @@ def dispatch_payload(
         "schedule_generation": 1,
         "occurrence_id": str(occurrence_id),
         "run_id": str(run_id),
+        "schedule": {
+            "kind": "recurring",
+            "frequency": "daily",
+            "local_time": "09:00:00",
+            "timezone": "Europe/Berlin",
+        },
         "scheduled_at": base.isoformat().replace("+00:00", "Z"),
         "delayed": False,
         "occurrence_disposition": "admitted",

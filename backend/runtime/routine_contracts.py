@@ -79,8 +79,8 @@ class RoutineEnvelope(RoutineContractModel):
     def validate_common(self) -> RoutineEnvelope:
         if self.producer == "cloud" and self.service_identity != "cloud-service":
             raise ValueError("cloud messages require cloud-service identity")
-        if self.producer == "foundry" and self.service_identity != "foundry-runtime":
-            raise ValueError("Foundry messages require foundry-runtime identity")
+        if self.producer == "foundry" and self.service_identity != "foundry-service":
+            raise ValueError("Foundry messages require foundry-service identity")
         _validate_times(self.issued_at, self.deadline_at)
         if not self.fingerprint.startswith(FINGERPRINT_PREFIX):
             raise ValueError("fingerprint is invalid")
@@ -101,6 +101,7 @@ class RoutineDispatch(RoutineEnvelope):
     schedule_generation: StrictInt = Field(..., ge=1)
     occurrence_id: UUID
     run_id: UUID
+    schedule: dict[str, Any]
     scheduled_at: datetime
     delayed: StrictBool
     occurrence_disposition: Literal[
@@ -125,6 +126,8 @@ class RoutineDispatch(RoutineEnvelope):
             raise ValueError("routine and main conversations must differ")
         if len(self.execution_prompt.encode("utf-8")) > MAX_ROUTINE_TEXT_BYTES:
             raise ValueError("execution prompt is too large")
+        if not self.schedule.get("kind") or not self.schedule.get("timezone"):
+            raise ValueError("routine dispatch schedule snapshot is incomplete")
         _validate_text(self.title_snapshot, 255, "title snapshot")
         return self
 
@@ -132,7 +135,7 @@ class RoutineDispatch(RoutineEnvelope):
 class RoutineDispatchReceipt(RoutineEnvelope):
     kind: Literal[ROUTINE_DISPATCH_RECEIPT_KIND]
     producer: Literal["foundry"]
-    service_identity: Literal["foundry-runtime"]
+    service_identity: Literal["foundry-service"]
     command_id: UUID
     idempotency_key: UUID
     outcome: Literal["accepted", "duplicate"]
@@ -147,7 +150,7 @@ class RoutineDispatchReceipt(RoutineEnvelope):
 class RoutineResult(RoutineEnvelope):
     kind: Literal[ROUTINE_RESULT_KIND]
     producer: Literal["foundry"]
-    service_identity: Literal["foundry-runtime"]
+    service_identity: Literal["foundry-service"]
     event_id: UUID
     event_sequence: StrictInt = Field(..., ge=1, le=MAX_ROUTINE_TERMINAL_SEQUENCE)
     routine_id: UUID
@@ -197,7 +200,7 @@ class RoutineEventReceipt(RoutineEnvelope):
 class RoutineApprovalRequested(RoutineEnvelope):
     kind: Literal[ROUTINE_APPROVAL_REQUESTED_KIND]
     producer: Literal["foundry"]
-    service_identity: Literal["foundry-runtime"]
+    service_identity: Literal["foundry-service"]
     event_id: UUID
     event_sequence: StrictInt = Field(..., ge=1, le=MAX_ROUTINE_SEQUENCE)
     approval_request_id: UUID
@@ -238,7 +241,7 @@ class RoutineApprovalDecision(RoutineEnvelope):
 class RoutineApprovalReceipt(RoutineEnvelope):
     kind: Literal[ROUTINE_APPROVAL_RECEIPT_KIND]
     producer: Literal["foundry"]
-    service_identity: Literal["foundry-runtime"]
+    service_identity: Literal["foundry-service"]
     command_id: UUID
     idempotency_key: UUID
     result_code: StrictStr = Field(..., min_length=1, max_length=64)
@@ -349,7 +352,7 @@ def build_routine_event_envelope(execution: Any, attempt: Any, event: Any) -> Ro
         "schema_version": "v1",
         "kind": event.event_type,
         "producer": "foundry",
-        "service_identity": "foundry-runtime",
+        "service_identity": "foundry-service",
         "event_id": str(event.event_id),
         "event_sequence": event.sequence,
         "scope": scope,

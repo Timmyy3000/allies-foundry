@@ -11,7 +11,7 @@ The identity tuple is kept in `routines-v1.lock.json` and is:
 ```text
 contract_name=routines
 schema_version=v1
-content_revision=9
+content_revision=14
 content_sha256=<SHA-256 of this exact file>
 fixture_sha256=<SHA-256 of fixtures/routines-v1.json>
 ```
@@ -77,7 +77,7 @@ Fixture messages use the following direction-specific authenticated envelopes:
   `idempotency_key`, the complete trusted workspace scope, `issued_at`,
   `deadline_at`, and `fingerprint`.
 - Foundry events use `producer: "foundry"`,
-  `service_identity: "foundry-runtime"`, `event_id`, `event_sequence`, the
+  `service_identity: "foundry-service"`, `event_id`, `event_sequence`, the
   complete trusted workspace scope, `issued_at`, `deadline_at`, and
   `fingerprint`. The event ID and sequence are the replay identity; event
   delivery retries do not invent a new event. The fixture uses this direction
