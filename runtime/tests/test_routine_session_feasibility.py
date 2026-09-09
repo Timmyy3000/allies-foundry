@@ -449,11 +449,11 @@ def test_run_probe_gates_probe_on_readiness(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("timed_out_command", "cleanup_command", "resource_label"),
+    ("timed_out_command", "cleanup_command"),
     [
-        (["network", "create"], ["network", "rm"], "network"),
-        (["volume", "create"], ["volume", "rm"], "volume"),
-        (["run", "--detach"], ["rm", "--force"], "container"),
+        (["network", "create"], ["network", "rm"]),
+        (["volume", "create"], ["volume", "rm"]),
+        (["run", "--detach"], ["rm", "--force"]),
     ],
 )
 def test_run_probe_cleans_up_resources_after_timeout(
@@ -461,7 +461,6 @@ def test_run_probe_cleans_up_resources_after_timeout(
     tmp_path,
     timed_out_command,
     cleanup_command,
-    resource_label,
 ):
     calls = []
     runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
@@ -475,11 +474,16 @@ def test_run_probe_cleans_up_resources_after_timeout(
             ["network", "rm"],
             ["volume", "rm"],
         ):
+            cleanup_resource = {
+                "rm": "container",
+                "network": "network",
+                "volume": "volume",
+            }[command[1]]
             return CompletedProcess(
                 command,
                 1,
                 stdout="",
-                stderr=f"{resource_label} not found",
+                stderr=f"{cleanup_resource} not found",
             )
         return runner(command, **kwargs)
 
@@ -495,6 +499,17 @@ def test_run_probe_cleans_up_resources_after_timeout(
     assert report["status"] == "SETUP_BLOCKED"
     assert report["cleanup"] == "passed"
     assert any(command[1:3] == cleanup_command for command in calls)
+
+
+def test_cleanup_rejects_unrelated_not_found_output():
+    result = CompletedProcess(
+        ["docker", "rm", "--force", "container"],
+        1,
+        stdout="",
+        stderr="credential plugin dependency not found",
+    )
+
+    assert not LAUNCH._cleanup_succeeded(result, "container")
 
 
 def test_run_probe_reports_cleanup_failure(monkeypatch, tmp_path):

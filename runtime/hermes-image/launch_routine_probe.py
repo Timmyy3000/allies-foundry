@@ -604,11 +604,16 @@ def _model_credential_name(provider: str) -> str:
     )
 
 
-def _cleanup_succeeded(result: CompletedProcess[str]) -> bool:
+def _cleanup_succeeded(result: CompletedProcess[str], resource: str) -> bool:
     if _succeeded(result):
         return True
     output = f"{result.stdout or ''}\n{result.stderr or ''}".casefold()
-    return any(marker in output for marker in ("no such", "not found", "does not exist"))
+    absence_markers = {
+        "container": ("no such container", "container not found"),
+        "network": ("no such network", "network not found"),
+        "volume": ("no such volume", "volume not found"),
+    }
+    return any(marker in output for marker in absence_markers[resource])
 
 
 def _cleanup(
@@ -619,17 +624,28 @@ def _cleanup(
     timeout: float,
 ) -> bool:
     outcomes: list[bool] = []
-    for command in (
-        ["docker", "rm", "--force", container_name] if container_name else None,
-        ["docker", "network", "rm", network_name] if network_name else None,
-        ["docker", "volume", "rm", data_volume_name]
-        if data_volume_name
-        else None,
+    for resource, command in (
+        (
+            "container",
+            ["docker", "rm", "--force", container_name] if container_name else None,
+        ),
+        (
+            "network",
+            ["docker", "network", "rm", network_name] if network_name else None,
+        ),
+        (
+            "volume",
+            ["docker", "volume", "rm", data_volume_name]
+            if data_volume_name
+            else None,
+        ),
     ):
         if command is None:
             continue
         try:
-            outcomes.append(_cleanup_succeeded(_run(runner, command, timeout)))
+            outcomes.append(
+                _cleanup_succeeded(_run(runner, command, timeout), resource)
+            )
         except (OSError, subprocess.TimeoutExpired):
             outcomes.append(False)
     return all(outcomes)
