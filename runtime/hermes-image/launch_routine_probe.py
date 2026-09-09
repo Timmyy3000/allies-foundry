@@ -604,6 +604,13 @@ def _model_credential_name(provider: str) -> str:
     )
 
 
+def _cleanup_succeeded(result: CompletedProcess[str]) -> bool:
+    if _succeeded(result):
+        return True
+    output = f"{result.stdout or ''}\n{result.stderr or ''}".casefold()
+    return any(marker in output for marker in ("no such", "not found", "does not exist"))
+
+
 def _cleanup(
     runner: Runner,
     container_name: str | None,
@@ -622,7 +629,7 @@ def _cleanup(
         if command is None:
             continue
         try:
-            outcomes.append(_succeeded(_run(runner, command, timeout)))
+            outcomes.append(_cleanup_succeeded(_run(runner, command, timeout)))
         except (OSError, subprocess.TimeoutExpired):
             outcomes.append(False)
     return all(outcomes)
@@ -709,25 +716,22 @@ def run_probe(
             )
             runtime_root = RUNTIME_ROOT
             probe_path = Path(__file__).with_name("smoke_routine_sessions.py")
-            container_candidate = _owned_name("hermes")
-            network_candidate = _owned_name("network")
+            network_name = _owned_name("network")
             network = _run(
                 runner,
-                build_network_command(network_candidate),
+                build_network_command(network_name),
                 setup_timeout_seconds,
             )
             if not _succeeded(network):
                 raise LaunchBlocked("owned isolated network could not be created")
-            network_name = network_candidate
-            data_volume_candidate = _owned_name("data")
+            data_volume_name = _owned_name("data")
             volume = _run(
                 runner,
-                build_data_volume_create_command(data_volume_candidate),
+                build_data_volume_create_command(data_volume_name),
                 setup_timeout_seconds,
             )
             if not _succeeded(volume):
                 raise LaunchBlocked("owned data volume could not be created")
-            data_volume_name = data_volume_candidate
             copied = _run(
                 runner,
                 build_data_volume_copy_command(
@@ -741,11 +745,12 @@ def run_probe(
                 raise LaunchBlocked(
                     "materialized profile could not be copied into data volume"
                 )
+            container_name = _owned_name("hermes")
             run_result = _run(
                 runner,
                 build_run_command(
                     image=image,
-                    container_name=container_candidate,
+                    container_name=container_name,
                     network_name=network_name,
                     data_root=data_root,
                     data_volume_name=data_volume_name,
@@ -759,7 +764,6 @@ def run_probe(
             )
             if not _succeeded(run_result):
                 raise LaunchBlocked("inherited /init container did not start")
-            container_name = container_candidate
             report["setup"] = "passed"
             if not _wait_for_readiness(runner, container_name, setup_timeout_seconds):
                 report.update(

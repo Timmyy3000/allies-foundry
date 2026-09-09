@@ -448,19 +448,43 @@ def test_run_probe_gates_probe_on_readiness(monkeypatch, tmp_path):
     )
 
 
-def test_run_probe_timeout_does_not_cleanup_uncreated_resources(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("timed_out_command", "cleanup_command", "resource_label"),
+    [
+        (["network", "create"], ["network", "rm"], "network"),
+        (["volume", "create"], ["volume", "rm"], "volume"),
+        (["run", "--detach"], ["rm", "--force"], "container"),
+    ],
+)
+def test_run_probe_cleans_up_resources_after_timeout(
+    monkeypatch,
+    tmp_path,
+    timed_out_command,
+    cleanup_command,
+    resource_label,
+):
     calls = []
     runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
 
     def timeout_runner(command, **kwargs):
         calls.append(command)
-        if command[1:3] == ["network", "create"]:
+        if command[1:3] == timed_out_command:
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if command[1:3] in (
+            ["rm", "--force"],
+            ["network", "rm"],
+            ["volume", "rm"],
+        ):
+            return CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"{resource_label} not found",
+            )
         return runner(command, **kwargs)
 
-    image = "allies/hermes@sha256:" + "c" * 64
     report = LAUNCH.run_probe(
-        image=image,
+        image="allies/hermes@sha256:" + "c" * 64,
         credential_ref="vault://cld012/hermes",
         model_profile_ref="vault://cld012/model",
         setup_timeout_seconds=1,
@@ -469,9 +493,8 @@ def test_run_probe_timeout_does_not_cleanup_uncreated_resources(monkeypatch, tmp
     )
 
     assert report["status"] == "SETUP_BLOCKED"
-    assert report["cleanup"] == "not_needed"
-    assert not any(command[1:3] == ["rm", "--force"] for command in calls)
-    assert not any(command[1:3] == ["network", "rm"] for command in calls)
+    assert report["cleanup"] == "passed"
+    assert any(command[1:3] == cleanup_command for command in calls)
 
 
 def test_run_probe_reports_cleanup_failure(monkeypatch, tmp_path):
