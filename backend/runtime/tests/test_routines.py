@@ -271,6 +271,78 @@ def test_generic_attempt_failure_is_projected_as_a_routine_result(routine_contex
     assert routine.status == RoutineRunStatus.FAILED
 
 
+def test_routine_result_locking_supports_postgres_normal_and_failed_replays(
+    routine_context,
+):
+    state = routine_context
+
+    _normal_command, normal_routine = dispatch(state, ordinal=1)
+    normal_claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert normal_claim is not None
+    normal_event_id = uuid4()
+    normal = append_runtime_routine_result(
+        state["context"],
+        normal_claim.attempt_id,
+        normal_claim.lease_token,
+        event_id=normal_event_id,
+        sequence=1,
+        outcome="unchanged",
+        text="No changes were needed.",
+        references=[],
+        delayed=False,
+    )
+    assert normal["status"] == "succeeded"
+    assert (
+        append_runtime_routine_result(
+            state["context"],
+            normal_claim.attempt_id,
+            normal_claim.lease_token,
+            event_id=normal_event_id,
+            sequence=1,
+            outcome="unchanged",
+            text="No changes were needed.",
+            references=[],
+            delayed=False,
+        )
+        == normal
+    )
+    normal_routine.refresh_from_db()
+    assert normal_routine.status == RoutineRunStatus.SUCCEEDED
+
+    _failed_command, failed_routine = dispatch(state, ordinal=2)
+    failed_claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert failed_claim is not None
+    failed_event_id = uuid4()
+    failed = append_runtime_routine_result(
+        state["context"],
+        failed_claim.attempt_id,
+        failed_claim.lease_token,
+        event_id=failed_event_id,
+        sequence=1,
+        outcome="failed",
+        text="The routine failed before completion.",
+        references=[],
+        delayed=False,
+    )
+    assert failed["status"] == "failed"
+    assert (
+        append_runtime_routine_result(
+            state["context"],
+            failed_claim.attempt_id,
+            failed_claim.lease_token,
+            event_id=failed_event_id,
+            sequence=1,
+            outcome="failed",
+            text="The routine failed before completion.",
+            references=[],
+            delayed=False,
+        )
+        == failed
+    )
+    failed_routine.refresh_from_db()
+    assert failed_routine.status == RoutineRunStatus.FAILED
+
+
 def test_stopped_routine_is_terminalized_with_a_failed_result(routine_context):
     state = routine_context
     command, routine = dispatch(state)

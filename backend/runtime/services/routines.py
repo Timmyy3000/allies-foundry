@@ -286,7 +286,7 @@ def _decide_routine_approval_once(
         return RoutineApprovalReceipt.model_validate(stored.response)
     routine = (
         RoutineExecution.objects.select_for_update()
-        .select_related("execution", "workspace", "profile", "current_attempt")
+        .select_related("execution", "workspace", "profile")
         .filter(
             workspace_id=workspace.id,
             run_id=command.run_id,
@@ -296,6 +296,9 @@ def _decide_routine_approval_once(
     )
     if routine is None:
         raise RuntimeNotFoundError("routine run is unavailable")
+    if routine.current_attempt_id is None:
+        raise RuntimeConflictError("routine has no current attempt")
+    attempt = Attempt.objects.select_for_update().get(pk=routine.current_attempt_id)
     _validate_routine_identity(routine, command)
     action = (
         RoutineApprovalAction.objects.select_for_update()
@@ -313,7 +316,7 @@ def _decide_routine_approval_once(
     if action.status != RoutineApprovalStatus.PENDING:
         raise RuntimeConflictError("approval request is no longer pending")
     if observed_at >= action.expires_at:
-        response = _expire_action_locked(routine, action, observed_at, command)
+        response = _expire_action_locked(routine, action, attempt, observed_at, command)
         _store_command_receipt(workspace, command, response.model_dump(mode="json"))
         return response
 
@@ -337,10 +340,8 @@ def _decide_routine_approval_once(
         routine.save(update_fields=["fence", "status", "terminal_receipt", "updated_at"])
         routine.execution.status = ExecutionStatus.CANCELLED
         routine.execution.save(update_fields=["status", "updated_at"])
-        attempt = routine.current_attempt
-        if attempt is not None:
-            attempt.status = AttemptStatus.CANCELLED
-            attempt.save(update_fields=["status", "updated_at"])
+        attempt.status = AttemptStatus.CANCELLED
+        attempt.save(update_fields=["status", "updated_at"])
         response = _approval_receipt(
             command,
             "APPROVAL_REJECTED",
@@ -371,9 +372,6 @@ def _decide_routine_approval_once(
     routine.save(update_fields=["status", "updated_at"])
     routine.execution.status = ExecutionStatus.RUNNING
     routine.execution.save(update_fields=["status", "updated_at"])
-    attempt = routine.current_attempt
-    if attempt is None:
-        raise RuntimeLeaseConflictError("routine has no attempt to resume")
     attempt.status = AttemptStatus.QUEUED
     attempt.save(update_fields=["status", "updated_at"])
     request_execution_wake_locked(workspace, now=observed_at)
@@ -469,13 +467,12 @@ def _request_routine_approval_once(
 ) -> ExecutionEvent:
     routine = (
         RoutineExecution.objects.select_for_update()
-        .select_related("execution", "workspace", "profile", "current_attempt")
+        .select_related("execution", "workspace", "profile")
         .get(pk=routine_execution_id)
     )
-    attempt = routine.current_attempt
-    if attempt is None:
+    if routine.current_attempt_id is None:
         raise RuntimeConflictError("routine has no current attempt")
-    attempt = Attempt.objects.select_for_update().get(pk=attempt.id)
+    attempt = Attempt.objects.select_for_update().get(pk=routine.current_attempt_id)
     existing = (
         RoutineApprovalAction.objects.select_for_update()
         .filter(action_attempt_id=action_attempt_id)
@@ -627,6 +624,9 @@ def _cancel_routine_wait_once(
     )
     if routine is None:
         raise RuntimeNotFoundError("routine run is unavailable")
+    attempt = None
+    if routine.current_attempt_id is not None:
+        attempt = Attempt.objects.select_for_update().get(pk=routine.current_attempt_id)
     _validate_routine_identity(routine, command)
     action = (
         RoutineApprovalAction.objects.select_for_update()
@@ -661,7 +661,6 @@ def _cancel_routine_wait_once(
     routine.save(update_fields=["fence", "status", "terminal_receipt", "updated_at"])
     routine.execution.status = ExecutionStatus.CANCELLED
     routine.execution.save(update_fields=["status", "updated_at"])
-    attempt = routine.current_attempt
     if attempt is not None:
         attempt.status = AttemptStatus.CANCELLED
         attempt.save(update_fields=["status", "updated_at"])
@@ -692,12 +691,33 @@ def expire_routine_approvals(
     )
     expired = 0
     for action_id in ids:
+        action_ref = (
+            RoutineApprovalAction.objects.filter(pk=action_id)
+            .values("routine_execution_id")
+            .first()
+        )
+        if action_ref is None:
+            continue
         with transaction.atomic():
-            action = RoutineApprovalAction.objects.select_for_update().filter(pk=action_id).first()
-            if action is None or action.status != RoutineApprovalStatus.PENDING or action.expires_at > observed_at:
+            routine = (
+                RoutineExecution.objects.select_for_update()
+                .filter(pk=action_ref["routine_execution_id"])
+                .first()
+            )
+            if routine is None:
                 continue
-            routine = RoutineExecution.objects.select_for_update().get(pk=action.routine_execution_id)
-            _expire_action_locked(routine, action, observed_at, None)
+            attempt = None
+            if routine.current_attempt_id is not None:
+                attempt = Attempt.objects.select_for_update().get(pk=routine.current_attempt_id)
+            action = RoutineApprovalAction.objects.select_for_update().filter(pk=action_id).first()
+            if (
+                action is None
+                or action.routine_execution_id != routine.id
+                or action.status != RoutineApprovalStatus.PENDING
+                or action.expires_at > observed_at
+            ):
+                continue
+            _expire_action_locked(routine, action, attempt, observed_at, None)
             expired += 1
     return expired
 
@@ -753,6 +773,12 @@ def append_runtime_routine_result(
         workspace = Workspace.objects.select_for_update().get(pk=context.workspace_id)
         if workspace.machine_generation != context.machine_generation:
             raise RuntimeFencedError("runtime generation is stale")
+        routine = RoutineExecution.objects.select_for_update().filter(
+            workspace_id=workspace.id,
+            current_attempt_id=attempt_id,
+        ).first()
+        if routine is None:
+            raise RuntimeLeaseConflictError("routine lease scope is stale")
         attempt = (
             Attempt.objects.select_for_update()
             .select_related("execution")
@@ -768,10 +794,7 @@ def append_runtime_routine_result(
         lease = Lease.objects.select_for_update().filter(attempt_id=attempt.id).first()
         if lease is None or lease.token_digest != token_digest:
             raise RuntimeLeaseConflictError("routine lease is stale")
-        routine = RoutineExecution.objects.select_for_update().filter(
-            current_attempt_id=attempt.id,
-        ).first()
-        if routine is None or lease.scope_key != routine_scope_key(routine.routine_id):
+        if lease.scope_key != routine_scope_key(routine.routine_id):
             raise RuntimeLeaseConflictError("routine lease scope is stale")
         request_event_id = _uuid(event_id, "event_id")
         request_digest = digest_payload(
@@ -848,12 +871,16 @@ def _record_routine_result_once(
 ) -> ExecutionEvent:
     routine = (
         RoutineExecution.objects.select_for_update()
-        .select_related("execution", "workspace", "profile", "current_attempt")
+        .select_related("execution", "workspace", "profile")
         .get(pk=routine_execution_id)
     )
-    attempt = routine.current_attempt
-    if attempt is None:
+    if routine.current_attempt_id is None:
         raise RuntimeConflictError("routine has no current attempt")
+    attempt = (
+        Attempt.objects.select_for_update()
+        .select_related("execution")
+        .get(pk=routine.current_attempt_id)
+    )
     event_id = _uuid(event_id or uuid4(), "event_id")
     sequence = (
         event_sequence if event_sequence is not None else _next_event_sequence(attempt.id)
@@ -950,6 +977,7 @@ def _record_routine_result_once(
 def _expire_action_locked(
     routine: RoutineExecution,
     action: RoutineApprovalAction,
+    attempt: Attempt | None,
     observed_at: datetime,
     command: RoutineApprovalDecision | None,
 ) -> RoutineApprovalReceipt | None:
@@ -963,7 +991,6 @@ def _expire_action_locked(
     routine.save(update_fields=["fence", "status", "terminal_receipt", "updated_at"])
     routine.execution.status = ExecutionStatus.FAILED
     routine.execution.save(update_fields=["status", "updated_at"])
-    attempt = routine.current_attempt
     if attempt is not None:
         attempt.status = AttemptStatus.FAILED
         attempt.save(update_fields=["status", "updated_at"])
