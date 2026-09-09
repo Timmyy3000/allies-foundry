@@ -87,6 +87,8 @@ def compose_runtime(
         profile_reconcile_interval=profile_reconcile_interval,
         activity_wait_enabled=settings.activity_wait_enabled,
         activity_wait_seconds=settings.activity_wait_seconds,
+        profile_store=profile_store,
+        file_input_enabled=settings.file_input_enabled,
         boot_id=correlation_id,
     )
     return RuntimeComposition(

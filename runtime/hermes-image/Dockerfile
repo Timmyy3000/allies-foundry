@@ -102,6 +102,15 @@ RUN cd /opt/hermes \
     && git apply --whitespace=nowarn /tmp/allies-routine-result-protocol.patch \
     && rm -f /tmp/allies-routine-result-protocol.patch
 
+# The runtime sends only a bounded staged-file manifest. This source-pinned
+# overlay keeps the context ephemeral and rejects bytes or routine use.
+COPY patches/incoming-file-context.patch /tmp/allies-incoming-file-context.patch
+RUN cd /opt/hermes \
+    && sed -i 's/\r$//' /tmp/allies-incoming-file-context.patch \
+    && git apply --check --whitespace=nowarn /tmp/allies-incoming-file-context.patch \
+    && git apply --whitespace=nowarn /tmp/allies-incoming-file-context.patch \
+    && rm -f /tmp/allies-incoming-file-context.patch
+
 COPY smoke_routine_result_tool.py /tmp/allies-smoke-routine-result-tool.py
 RUN /opt/hermes/.venv/bin/python /tmp/allies-smoke-routine-result-tool.py \
     && rm -f /tmp/allies-smoke-routine-result-tool.py

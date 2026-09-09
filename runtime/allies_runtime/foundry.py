@@ -29,6 +29,7 @@ from .errors import (
     HermesMalformedResponse,
     HermesTimeout,
 )
+from .files import stage_incoming_files
 from .hermes import (
     HermesBootstrap,
     HermesEvent,
@@ -157,6 +158,14 @@ class FoundryTransport(Protocol):
         body: Mapping[str, Any] | None = None,
     ) -> Any: ...
 
+    async def stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: Mapping[str, str],
+    ) -> Any: ...
+
 
 class FoundryError(RuntimeError):
     """A bounded, typed Foundry response failure."""
@@ -266,6 +275,7 @@ class FoundryClaim:
     claim_id: str
     routine_id: str | None = None
     reasoning_effort: str | None = None
+    command_id: str | None = None
 
     def __repr__(self) -> str:  # pragma: no cover - defensive redaction
         return (
@@ -454,6 +464,30 @@ class UrllibFoundryTransport:
                     return {"status": response.status, "body": response.read(1_048_577)}
             except urllib.error.HTTPError as exc:
                 return {"status": exc.code, "body": exc.read(1_048_577)}
+
+        return await asyncio.to_thread(send)
+
+    async def stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: Mapping[str, str],
+    ) -> Any:
+        """Open one bounded-read response without buffering its file body."""
+
+        def send() -> Mapping[str, Any]:
+            request = urllib.request.Request(
+                f"{self.base_url}{path}", method=method, headers=dict(headers)
+            )
+            try:
+                response = urllib.request.urlopen(request, timeout=self.timeout)
+                return {"status": response.status, "response": response}
+            except urllib.error.HTTPError as exc:
+                try:
+                    return {"status": exc.code, "body": exc.read(16_385)}
+                finally:
+                    exc.close()
 
         return await asyncio.to_thread(send)
 
@@ -767,6 +801,18 @@ class FoundryClient:
                 ) from exc
         else:
             reasoning_effort = None
+        raw_command_id = payload.get("command_id")
+        if raw_command_id is not None:
+            try:
+                command_id = str(UUID(str(raw_command_id)))
+            except (TypeError, ValueError) as exc:
+                raise FoundryError(
+                    "Foundry claim response contained an invalid command identity",
+                    status=200,
+                    code="MALFORMED_RESPONSE",
+                ) from exc
+        else:
+            command_id = None
         return FoundryClaim(
             attempt_id=str(payload["attempt_id"]),
             execution_id=str(payload["execution_id"]),
@@ -789,7 +835,87 @@ class FoundryClient:
                 else None
             ),
             reasoning_effort=reasoning_effort,
+            command_id=command_id,
         )
+
+    async def incoming_file_chunks(
+        self,
+        attempt_id: str,
+        file_id: str,
+        lease_token: str,
+    ) -> AsyncIterator[bytes]:
+        """Yield one backend-authorized file in fixed-size chunks."""
+
+        try:
+            attempt = str(UUID(str(attempt_id)))
+            file = str(UUID(str(file_id)))
+        except (TypeError, ValueError):
+            raise InvalidRequestError("incoming file identity was invalid") from None
+        if (
+            not isinstance(lease_token, str)
+            or not lease_token
+            or "\r" in lease_token
+            or "\n" in lease_token
+        ):
+            raise ValueError("lease token must be a bounded header value")
+        stream = getattr(self._transport, "stream", None)
+        if not callable(stream):
+            raise FoundryError(
+                "Foundry file transport was unavailable",
+                status=0,
+                code="FILE_TRANSPORT_UNAVAILABLE",
+            )
+        headers = {
+            "Accept": "application/octet-stream",
+            "Authorization": f"Bearer {self._runtime_token}",
+            "X-Foundry-Lease-Token": lease_token,
+        }
+        path = f"/api/v1/runtime/attempts/{attempt}/files/{file}/content"
+        try:
+            raw = stream("GET", path, headers=headers)
+            if inspect.isawaitable(raw):
+                raw = await raw
+        except (TimeoutError, ConnectionError, OSError, urllib.error.URLError) as exc:
+            raise ResponseLossError("Foundry file response was lost") from exc
+        status, payload = _parse_response(raw)
+        if status < 200 or status >= 300:
+            raise _error_for(status, payload)
+        response = raw.get("response") if isinstance(raw, Mapping) else None
+        if response is None:
+            chunks = raw.get("chunks") if isinstance(raw, Mapping) else None
+            if not isinstance(chunks, (list, tuple)):
+                raise FoundryError(
+                    "Foundry file response was malformed",
+                    status=200,
+                    code="MALFORMED_RESPONSE",
+                )
+            for chunk in chunks:
+                if not isinstance(chunk, bytes) or not chunk or len(chunk) > 64 * 1024:
+                    raise FoundryError(
+                        "Foundry file response was malformed",
+                        status=200,
+                        code="MALFORMED_RESPONSE",
+                    )
+                yield chunk
+            return
+        try:
+            while True:
+                chunk = await asyncio.to_thread(response.read, 64 * 1024)
+                if not chunk:
+                    return
+                if not isinstance(chunk, bytes) or len(chunk) > 64 * 1024:
+                    raise FoundryError(
+                        "Foundry file response was malformed",
+                        status=200,
+                        code="MALFORMED_RESPONSE",
+                    )
+                yield chunk
+        except FoundryError:
+            raise
+        except (OSError, ConnectionError) as exc:
+            raise ResponseLossError("Foundry file response was lost") from exc
+        finally:
+            response.close()
 
     async def reconciliation_snapshot(self) -> RuntimeReconciliationSnapshot:
         """Read profile state plus the current server-owned start epoch."""
@@ -1354,12 +1480,15 @@ async def _stream_events(
     session_key: str,
     reasoning_effort: str | None = None,
     routine_result: bool = False,
+    file_context: Mapping[str, Any] | None = None,
 ) -> Any:
     stream_kwargs: dict[str, Any] = {"session_key": session_key}
     if reasoning_effort is not None:
         stream_kwargs["reasoning_effort"] = reasoning_effort
     if routine_result:
         stream_kwargs["routine_result"] = True
+    if file_context is not None:
+        stream_kwargs["file_context"] = file_context
     method = getattr(hermes, "stream_profile_incremental", None)
     if callable(method):
         result = method(profile_id, session_id, message, **stream_kwargs)
@@ -1419,6 +1548,8 @@ class FoundryWorker:
         activity_wait_enabled: bool = False,
         activity_wait_seconds: float = 5.0,
         approval_poll_interval: float = APPROVAL_POLL_INTERVAL,
+        profile_store: Any | None = None,
+        file_input_enabled: bool = False,
     ):
         if (
             isinstance(slots, bool)
@@ -1444,6 +1575,8 @@ class FoundryWorker:
             or not 0 < float(approval_poll_interval) <= 5
         ):
             raise ValueError("approval poll interval must be between 0 and 5")
+        if not isinstance(file_input_enabled, bool):
+            raise TypeError("file input enabled must be a boolean")
         self.foundry = foundry
         self.hermes = hermes
         self.slots = slots
@@ -1462,6 +1595,8 @@ class FoundryWorker:
         self._activity_wait_enabled = activity_wait_enabled
         self._activity_wait_seconds = float(activity_wait_seconds)
         self._approval_poll_interval = float(approval_poll_interval)
+        self._profile_store = profile_store
+        self._file_input_enabled = file_input_enabled
         self._activity_revision = 0
         self._active: set[asyncio.Task[Any]] = set()
         self._ambiguous_claims: dict[str, float] = {}
@@ -1565,7 +1700,7 @@ class FoundryWorker:
                 await self.foundry.renew(claim.attempt_id, claim.lease_token)
             except (FoundryError, TimeoutError, OSError, ConnectionError):
                 lost.set()
-                await _close_stream(stream)
+                await _close_stream(stream[0] if isinstance(stream, list) else stream)
                 return
 
     async def _wait_for_approval(
@@ -1746,17 +1881,24 @@ class FoundryWorker:
 
     async def _run_claim(self, claim: FoundryClaim) -> Any:
         stream = None
+        stream_ref = [None]
         lost = asyncio.Event()
         renewal: asyncio.Task[Any] | None = None
         sequence = 0
         result_text: list[str] = []
         result_text_bytes = 0
         try:
+            files = claim.payload.get("files")
             try:
-                message = validate_stream_message(
-                    claim.payload.get(
-                        "execution_prompt" if claim.routine_id is not None else "message"
-                    )
+                message_value = claim.payload.get(
+                    "execution_prompt" if claim.routine_id is not None else "message"
+                )
+                message = (
+                    ""
+                    if files is not None
+                    and claim.routine_id is None
+                    and message_value == ""
+                    else validate_stream_message(message_value)
                 )
             except ValueError:
                 raise InvalidRequestError("Execution message was invalid")
@@ -1846,6 +1988,30 @@ class FoundryWorker:
             if bootstrap is not None:
                 await self._bootstrap_first_turn(claim, session_id)
 
+            file_context = None
+            if files is not None:
+                if claim.routine_id is not None:
+                    raise InvalidRequestError("Routine executions cannot use incoming files")
+                if not self._file_input_enabled:
+                    raise NotReadyError("incoming file input is disabled")
+                workspace_path = getattr(self._profile_store, "workspace_path", None)
+                if not callable(workspace_path):
+                    raise HermesError("profile workspace staging was unavailable")
+                renewal = asyncio.create_task(self._renew_loop(claim, stream_ref, lost))
+                staged = await stage_incoming_files(
+                    workspace_path(claim.hermes_profile_key),
+                    claim.command_id or claim.execution_id,
+                    files,
+                    lambda descriptor: self.foundry.incoming_file_chunks(
+                        claim.attempt_id,
+                        descriptor.file_id,
+                        claim.lease_token,
+                    ),
+                )
+                if lost.is_set():
+                    raise LeaseConflictError("lease was lost while staging files")
+                file_context = staged.hermes_context()
+
             sequence = 1
             dispatch_payload = {"status": "dispatched"}
             try:
@@ -1888,8 +2054,11 @@ class FoundryWorker:
                 session_key=identifiers.session_key,
                 reasoning_effort=claim.reasoning_effort,
                 routine_result=claim.routine_id is not None,
+                file_context=file_context,
             )
-            renewal = asyncio.create_task(self._renew_loop(claim, stream, lost))
+            stream_ref[0] = stream
+            if renewal is None:
+                renewal = asyncio.create_task(self._renew_loop(claim, stream, lost))
             terminal: HermesEvent | None = None
             pending_approval: dict[str, str] | None = None
             proof_hold = claim.payload.get("proof_hold_after_first_safe_event") is True

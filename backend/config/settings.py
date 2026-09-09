@@ -19,7 +19,6 @@ from urllib.parse import urlsplit
 
 import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
-
 from observability.settings import FoundryObservabilitySettings
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -247,13 +246,20 @@ if not DEBUG and (
 ALLIES_CLOUD_EVENT_DELIVERY_ENABLED = env_bool(
     "ALLIES_CLOUD_EVENT_DELIVERY_ENABLED", default=False
 )
+ALLIES_RUNTIME_FILE_INPUT_ENABLED = env_bool(
+    "ALLIES_RUNTIME_FILE_INPUT_ENABLED", default=False
+)
 ALLIES_CLOUD_URL = os.getenv("ALLIES_CLOUD_URL")
 ALLIES_CLOUD_EVENT_SERVICE_TOKEN = os.getenv("ALLIES_CLOUD_EVENT_SERVICE_TOKEN")
 ALLIES_RUNTIME_READINESS_HINT_ENABLED = env_bool(
     "ALLIES_RUNTIME_READINESS_HINT_ENABLED",
     default=bool(ALLIES_CLOUD_URL and ALLIES_CLOUD_EVENT_SERVICE_TOKEN),
 )
-if ALLIES_CLOUD_EVENT_DELIVERY_ENABLED or ALLIES_RUNTIME_READINESS_HINT_ENABLED:
+if (
+    ALLIES_CLOUD_EVENT_DELIVERY_ENABLED
+    or ALLIES_RUNTIME_READINESS_HINT_ENABLED
+    or ALLIES_RUNTIME_FILE_INPUT_ENABLED
+):
     if not ALLIES_CLOUD_URL or not ALLIES_CLOUD_EVENT_SERVICE_TOKEN:
         raise ImproperlyConfigured(
             "ALLIES_CLOUD_URL and ALLIES_CLOUD_EVENT_SERVICE_TOKEN are required "

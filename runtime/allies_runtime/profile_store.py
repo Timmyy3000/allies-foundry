@@ -1184,6 +1184,15 @@ class ProfileStore:
         except (OSError, UnicodeError):
             raise ProfileStoreError("profile API key is unavailable") from None
 
+    def workspace_path(self, profile_key: str) -> Path:
+        """Return the existing private workspace for one materialized profile."""
+
+        profile = self._profile_path(profile_key)
+        workspace = profile / "workspace"
+        if workspace.is_symlink() or not _is_directory(workspace):
+            raise ProfileStoreError("profile workspace is unavailable")
+        return workspace
+
     def _local_lock(self, key: str) -> threading.Lock:
         identity = (str(self.volume_root), key)
         with self._local_locks_guard:

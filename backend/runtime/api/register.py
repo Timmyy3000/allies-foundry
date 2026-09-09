@@ -4,7 +4,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from django.conf import settings
 from django.core.management.base import CommandError
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from ninja.errors import ValidationError as NinjaValidationError
 from ninja.security import HttpBearer
 from ninja_extra import NinjaExtraAPI
@@ -47,6 +47,7 @@ from runtime.services.executions import (
     create_execution_intent,
     reconcile_execution_intent,
 )
+from runtime.services.files import open_incoming_file
 from runtime.services.leases import acknowledge_stopped, renew_lease
 from runtime.services.profiles import (
     ProfileSeed,
@@ -191,6 +192,30 @@ def register(api: NinjaExtraAPI) -> None:
                 },
                 status=200,
             )
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.get("/runtime/attempts/{attempt_id}/files/{file_id}/content", auth=None)
+    def incoming_file_content(
+        request: HttpRequest,
+        attempt_id: UUID,
+        file_id: UUID,
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            content = open_incoming_file(
+                context,
+                attempt_id,
+                _lease_token(request),
+                file_id,
+            )
+            response = StreamingHttpResponse(
+                content.chunks,
+                content_type=content.content_type,
+            )
+            response["Content-Length"] = str(content.content_length)
+            response["Cache-Control"] = "no-store"
+            return response
         except RuntimeDomainError as exc:
             return _error(exc)
 
@@ -786,6 +811,7 @@ def _claim_json(claim):
     return {
         "attempt_id": str(claim.attempt_id),
         "execution_id": str(claim.execution_id),
+        "command_id": str(claim.command_id) if claim.command_id is not None else None,
         "profile_id": str(claim.profile_id),
         "hermes_profile_key": claim.hermes_profile_key,
         "model": claim.model,
