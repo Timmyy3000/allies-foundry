@@ -7,8 +7,9 @@ Verdict: ACCEPT
 
 Read-only follow-up review of the revision-14 Cloud and Foundry contract
 artifacts and their consumer tests. The review covered the revision-13
-schedule, lifecycle/action-attempt correction, bounded feasibility fixes, and
-the Foundry service-identity alignment raised by hosted review.
+schedule, lifecycle/action-attempt correction, bounded feasibility fixes, the
+Foundry service-identity alignment raised by hosted review, the complete
+history-canary matrix, and bounded cleanup after uncertain Docker side effects.
 
 ## Finding disposition
 
@@ -17,12 +18,16 @@ Revision 14 aligns every routine Foundry envelope with the existing v1
 `foundry-service` identity literal, recomputes all four affected canonical
 fingerprints, advances the content revision, refreshes the lock, and vendors
 the exact bytes. The Cloud and Foundry structural tests assert the same value.
+The feasibility harness checks each session's own canary against both foreign
+canaries, and pre-registers deterministic network, volume, and container names
+so cleanup runs after timeout-after-side-effect outcomes; explicit Docker
+absence responses count as verified cleanup.
 
 ## Verified tuple
 
 - Cloud artifact head: `3af3da24e8f8e516861f34ddaa85442bbe25eaa1`
 - Foundry artifact head: `2626076973cfa52eec00eed265ab045b8b7b9ac5`
-- Foundry final evidence head: `4784900e94ce5c20f5e3f109e91b80937664f932`
+- Foundry final evidence head: `912a8b0523c39d52c86fca85bbd66cca2e129a18`
 - Contract revision: `14`
 - Contract SHA-256: `f05ab0a1baf63551f426c288f0144484c813b5cda535bf1cf5d614fb7a22ea84`
 - Fixture SHA-256: `2660d30ee73e8f3cebf94340ea1169019e3c937fd01a30bff6d0e16ecd54ab35`
@@ -34,13 +39,16 @@ the exact bytes. The Cloud and Foundry structural tests assert the same value.
 
 - Cloud contract tests: `7 passed`.
 - Foundry vendor contract tests: `5 passed`.
-- Foundry focused feasibility tests: `32 passed`.
+- Foundry focused feasibility tests: `38 passed`.
 - Final-head evidence regressions cover exact readiness output, post-turn
-  assertion validation, and success-status recall gating.
+  assertion validation, success-status recall gating, the complete six-direction
+  history-canary matrix, and timeout-after-side-effect cleanup for network,
+  volume, and container resources.
 - Foundry harness syntax compilation and scoped checks passed.
 - Class A remains `INCONCLUSIVE_REVIEW_REQUIRED`; Class B remains
   `SETUP_BLOCKED`.
-- Unrelated local Foundry harness edits remain excluded from the contract
-  commits.
+- The bounded real-Hermes lifecycle/profile-volume correction is included in the
+  final evidence head; it remains harness tooling and does not claim production
+  capability.
 - No production implementation, merge, deployment, or live capability claim
   is included.
