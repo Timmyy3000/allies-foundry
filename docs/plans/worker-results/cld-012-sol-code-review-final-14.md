@@ -44,6 +44,11 @@ that aggregate formula.
 - Cloud artifact head: `3af3da24e8f8e516861f34ddaa85442bbe25eaa1`
 - Foundry artifact head: `2626076973cfa52eec00eed265ab045b8b7b9ac5`
 - Foundry final evidence head: `cae833ddace34ba92bd2670de1e8bf8edebd76d3`
+- Foundry PR/document head reviewed: `7a92656e0d272fa7648c68cadd0b05131454d75c`,
+  a documentation-only successor to the evidence code head. This record's
+  containing correction is also documentation-only; the PR description carries
+  the resulting current head. No harness code changed after the evidence code
+  head.
 - Contract revision: `14`
 - Contract SHA-256: `f05ab0a1baf63551f426c288f0144484c813b5cda535bf1cf5d614fb7a22ea84`
 - Fixture SHA-256: `2660d30ee73e8f3cebf94340ea1169019e3c937fd01a30bff6d0e16ecd54ab35`
