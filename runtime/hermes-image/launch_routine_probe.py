@@ -456,7 +456,14 @@ def _has_class_b_evidence(payload: Any) -> bool:
     return _validated_probe_report(payload, 0) is not None
 
 
-def _materialize_profile(data_root: Path, socket_path: Path, model_profile_ref: str) -> str:
+def _materialize_profile(
+    data_root: Path,
+    socket_path: Path,
+    model_profile_ref: str,
+    *,
+    provider: str,
+    base_url: str | None,
+) -> str:
     try:
         from allies_runtime.hermes import UnixSocketCredentialResolver
         from allies_runtime.profile_store import (
@@ -472,11 +479,11 @@ def _materialize_profile(data_root: Path, socket_path: Path, model_profile_ref: 
         foundry_profile_id=profile_id,
         ally_name="cld012-synthetic-ally",
         personality="Synthetic CLD-012 feasibility profile.",
-        provider=os.environ["CLD012_MODEL_PROVIDER"],
+        provider=provider,
         model=MODEL,
         first_chat_instruction="Use only the authorized tools for this bounded synthetic probe.",
         credential_refs={"MODEL_PROVIDER_API_KEY": model_profile_ref},
-        base_url=os.environ.get("CLD012_MODEL_BASE_URL"),
+        base_url=base_url,
         memory_mode="narrow_tools",
         memory_tool_allowlist=("mnemosyne_recall", "mnemosyne_remember"),
         memory_profile_isolation=True,
@@ -561,6 +568,7 @@ def run_probe(
             probe_timeout_seconds=probe_timeout_seconds,
             environment=environment,
         )
+        values = os.environ if environment is None else environment
         if shutil.which("docker") is None:
             raise LaunchBlocked("docker is unavailable")
         version = _run(runner, ["docker", "version", "--format", "{{.Server.Version}}"], 5)
@@ -595,7 +603,13 @@ def run_probe(
                 (credential_ref, model_profile_ref),
             )
             proxy.start()
-            profile_id = _materialize_profile(data_root, socket_path, model_profile_ref)
+            profile_id = _materialize_profile(
+                data_root,
+                socket_path,
+                model_profile_ref,
+                provider=values.get("CLD012_MODEL_PROVIDER", ""),
+                base_url=values.get("CLD012_MODEL_BASE_URL"),
+            )
             runtime_root = RUNTIME_ROOT
             probe_path = Path(__file__).with_name("smoke_routine_sessions.py")
             container_name = _owned_name("hermes")

@@ -239,7 +239,9 @@ def _patch_launcher_setup(monkeypatch, tmp_path, calls):
 
     monkeypatch.setattr(LAUNCH, "CredentialSocketProxy", DummyProxy)
     monkeypatch.setattr(LAUNCH.shutil, "which", lambda name: "docker")
-    monkeypatch.setattr(LAUNCH, "_materialize_profile", lambda *args: "profile")
+    monkeypatch.setattr(
+        LAUNCH, "_materialize_profile", lambda *args, **kwargs: "profile"
+    )
     monkeypatch.setattr(
         LAUNCH,
         "validate_inputs",
@@ -269,6 +271,45 @@ def _patch_launcher_setup(monkeypatch, tmp_path, calls):
         return result(command)
 
     return runner
+
+
+def test_run_probe_uses_supplied_environment_for_profile_materialization(
+    monkeypatch, tmp_path
+):
+    calls = []
+    runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(LAUNCH, "_wait_for_readiness", lambda *args: False)
+    monkeypatch.delenv("CLD012_MODEL_PROVIDER", raising=False)
+    monkeypatch.delenv("CLD012_MODEL_BASE_URL", raising=False)
+    materialized = {}
+
+    def materialize(data_root, socket_path, model_profile_ref, *, provider, base_url):
+        materialized.update(provider=provider, base_url=base_url)
+        return "profile"
+
+    monkeypatch.setattr(LAUNCH, "_materialize_profile", materialize)
+    environment = {
+        "CLD012_MODEL_PROVIDER": "custom-provider",
+        "CLD012_MODEL_BASE_URL": "https://provider.invalid/v1",
+        "CLD012_UPSTREAM_CREDENTIAL_SOCKET": str(tmp_path / "upstream.sock"),
+    }
+    image = "allies/hermes@sha256:" + "0" * 64
+
+    report = LAUNCH.run_probe(
+        image=image,
+        credential_ref="vault://cld012/hermes",
+        model_profile_ref="vault://cld012/model",
+        setup_timeout_seconds=1,
+        probe_timeout_seconds=1,
+        runner=runner,
+        environment=environment,
+    )
+
+    assert report["status"] == "SETUP_BLOCKED"
+    assert materialized == {
+        "provider": "custom-provider",
+        "base_url": "https://provider.invalid/v1",
+    }
 
 
 def test_run_probe_gates_probe_on_readiness(monkeypatch, tmp_path):
