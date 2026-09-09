@@ -1,10 +1,10 @@
 {
   "contract_name": "routines",
   "schema_version": "v1",
-  "content_revision": 9,
+  "content_revision": 10,
   "normative_owner": "cloud",
-  "content_sha256": "891a9eb9932be9e7826baaf313ded7c6fd4f8526a661e0be5a83b6118fee76de",
-  "fixture_sha256": "259577de2ea7e8343b266995767496d359aef196f1a19d6841e67ef133fb3343",
+  "content_sha256": "d1a75807463cb16c7306acad04569a32502b333d42bbc947feb78cc82d5ec24d",
+  "fixture_sha256": "7d5b1e9cb7b2691719c89737de09058013074914bd6b3bf50391321559f59d28",
   "hash_algorithm": "sha256",
   "hash_encoding": "utf-8-no-bom-lf-final-newline",
   "future_enforcement_owners": ["CLD-013", "FND-012", "integration"]
