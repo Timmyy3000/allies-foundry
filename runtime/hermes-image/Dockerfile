@@ -75,6 +75,15 @@ RUN cd /opt/hermes \
     && git apply --whitespace=nowarn /tmp/allies-approval-flow.patch \
     && rm -f /tmp/allies-approval-flow.patch
 
+# The provider publishes its narrow tool schemas during initialization.  Keep
+# Hermes dispatch in sync with that lifecycle so advertised memory tools route
+# in the active profile instead of falling through as unknown tools.
+COPY patches/memory-provider-tool-routing.patch /tmp/allies-memory-provider-tool-routing.patch
+RUN cd /opt/hermes \
+    && git apply --check --whitespace=nowarn /tmp/allies-memory-provider-tool-routing.patch \
+    && git apply --whitespace=nowarn /tmp/allies-memory-provider-tool-routing.patch \
+    && rm -f /tmp/allies-memory-provider-tool-routing.patch
+
 LABEL org.opencontainers.image.title="Allies Hermes with Mnemosyne" \
       org.opencontainers.image.description="Policy-fenced profile-local Mnemosyne provider" \
       org.opencontainers.image.version="${ALLIES_WRAPPER_VERSION}" \
