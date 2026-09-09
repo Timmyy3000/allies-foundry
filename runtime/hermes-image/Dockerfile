@@ -112,6 +112,9 @@ RUN cd /opt/hermes \
     && rm -f /tmp/allies-incoming-file-context.patch
 
 COPY smoke_routine_result_tool.py /tmp/allies-smoke-routine-result-tool.py
+COPY smoke_incoming_file_context.py /tmp/allies-smoke-incoming-file-context.py
+RUN /opt/hermes/.venv/bin/python /tmp/allies-smoke-incoming-file-context.py \
+    && rm -f /tmp/allies-smoke-incoming-file-context.py
 RUN /opt/hermes/.venv/bin/python /tmp/allies-smoke-routine-result-tool.py \
     && rm -f /tmp/allies-smoke-routine-result-tool.py
 
