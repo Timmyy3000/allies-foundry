@@ -61,7 +61,7 @@ diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
 +        if total_size > 50_000_000:
 +            raise ValueError("allies_file_context is invalid")
 +        normalized.append({"file_id": file_id, "name": name, "media_type": media_type, "size": size, "sha256": sha256, "path": path})
-+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
++    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 +    if len(encoded.encode("utf-8")) > 16_384:
 +        raise ValueError("allies_file_context is invalid")
 +    return _ALLIES_INCOMING_FILE_CONTEXT_PROMPT + encoded

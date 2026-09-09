@@ -24,6 +24,9 @@ def main() -> None:
     assert _allies_incoming_file_context_prompt(
         {**context, "files": [{**descriptor, "name": "界" * 255}]}
     )
+    assert _allies_incoming_file_context_prompt(
+        {**context, "files": [{**descriptor, "name": "😀" * 255}] * 10}
+    )
     for invalid in (
         {**context, "files": []},
         {**context, "files": [{**descriptor, "path": "../other/notes.txt"}]},
