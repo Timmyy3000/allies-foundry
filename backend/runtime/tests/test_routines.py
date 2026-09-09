@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event, local
+from time import monotonic
 from uuid import UUID, uuid4, uuid5
 
 import pytest
 from django.conf import settings
+from django.db import close_old_connections, connection, transaction
+from django.db.models.query import QuerySet
 from django.test import Client
 from django.utils import timezone as django_timezone
 
 from runtime.exceptions import (
     RuntimeConflictError,
     RuntimeFencedError,
+    RuntimeLeaseConflictError,
     RuntimeNotReadyError,
 )
 from runtime.models import (
@@ -341,6 +347,121 @@ def test_routine_result_locking_supports_postgres_normal_and_failed_replays(
     )
     failed_routine.refresh_from_db()
     assert failed_routine.status == RoutineRunStatus.FAILED
+
+
+@pytest.mark.django_db(transaction=True)
+def test_postgres_result_and_expiry_race_has_one_terminal_outcome(
+    routine_context, monkeypatch, transactional_db
+):
+    if connection.vendor != "postgresql":
+        pytest.skip("requires PostgreSQL row-lock semantics")
+
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+    request_routine_approval(
+        routine.id,
+        action_attempt_id=uuid4(),
+        approval_request_id=uuid4(),
+        action_digest="a" * 64,
+        provider_idempotency_key="provider-action-race",
+        expires_at=state["base"] + timedelta(minutes=1),
+        now=state["base"],
+    )
+    role = local()
+    worker_pids = {}
+    expiry_routine_query = Event()
+    result_routine_query = Event()
+    original_first = QuerySet.first
+
+    def coordinated_first(queryset, *args, **kwargs):
+        if queryset.model is RoutineExecution:
+            if getattr(role, "name", None) == "expiry":
+                expiry_routine_query.set()
+            elif getattr(role, "name", None) == "result":
+                result_routine_query.set()
+        return original_first(queryset, *args, **kwargs)
+
+    monkeypatch.setattr(QuerySet, "first", coordinated_first)
+
+    def set_lock_timeout(role_name: str) -> None:
+        close_old_connections()
+        role.name = role_name
+        with connection.cursor() as cursor:
+            cursor.execute("SET lock_timeout = '2s'")
+            cursor.execute("SELECT pg_backend_pid()")
+            worker_pids[role_name] = cursor.fetchone()[0]
+
+    def wait_for_controller_block(controller_pid: int, worker_pid: int) -> None:
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT %s = ANY(pg_blocking_pids(%s))",
+                    [controller_pid, worker_pid],
+                )
+                if cursor.fetchone()[0]:
+                    return
+        raise AssertionError("expiry worker did not queue on the held routine lock")
+
+    def append_result():
+        try:
+            set_lock_timeout("result")
+            append_runtime_routine_result(
+                state["context"],
+                claim.attempt_id,
+                claim.lease_token,
+                event_id=uuid4(),
+                sequence=1,
+                outcome="unchanged",
+                text="The result races approval expiry.",
+                references=[],
+                delayed=False,
+                now=state["base"] + timedelta(minutes=1),
+            )
+        except RuntimeLeaseConflictError:
+            return "stale"
+        finally:
+            connection.close()
+        return "result"
+
+    def expire_approval():
+        try:
+            set_lock_timeout("expiry")
+            return expire_routine_approvals(
+                now=state["base"] + timedelta(minutes=1),
+            )
+        finally:
+            connection.close()
+
+    controller = transaction.atomic()
+    controller.__enter__()
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        RoutineExecution.objects.select_for_update().get(pk=routine.id)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            controller_pid = cursor.fetchone()[0]
+        expiry_future = executor.submit(expire_approval)
+        assert expiry_routine_query.wait(timeout=5)
+        wait_for_controller_block(controller_pid, worker_pids["expiry"])
+        result_future = executor.submit(append_result)
+        assert result_routine_query.wait(timeout=5)
+        controller.__exit__(None, None, None)
+        controller = None
+        result_outcome = result_future.result(timeout=10)
+        expiry_outcome = expiry_future.result(timeout=10)
+    finally:
+        if controller is not None:
+            controller.__exit__(None, None, None)
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    assert result_outcome == "stale"
+    assert expiry_outcome == 1
+    routine.refresh_from_db()
+    assert routine.status == RoutineRunStatus.EXPIRED
+    assert routine.current_attempt.status == AttemptStatus.FAILED
 
 
 def test_stopped_routine_is_terminalized_with_a_failed_result(routine_context):
