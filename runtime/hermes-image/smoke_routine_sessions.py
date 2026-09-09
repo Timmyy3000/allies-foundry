@@ -81,6 +81,21 @@ def _report(mode: str, status: str, checks: list[dict[str, str]]) -> dict[str, A
     }
 
 
+def _service_status(checks: list[dict[str, str]]) -> str:
+    if any(item["status"] == "fail" for item in checks):
+        return "CAPABILITY_FAILED"
+    if any(
+        item["name"] == "server_observable_barrier" and item["status"] == "blocked"
+        for item in checks
+    ):
+        return "SETUP_BLOCKED"
+    return (
+        "CAPABILITY_PASSED"
+        if all(item["status"] == "pass" for item in checks)
+        else "CAPABILITY_FAILED"
+    )
+
+
 def _provider_instance(
     provider_class: type[Any],
     root: Path,
@@ -973,17 +988,7 @@ async def _service_probe(timeout_seconds: float) -> dict[str, Any]:
             "real memory and file canaries were not both observed",
         )
     )
-    status = (
-        "SETUP_BLOCKED"
-        if any(
-            item["name"] == "server_observable_barrier"
-            and item["status"] == "blocked"
-            for item in checks
-        )
-        else "CAPABILITY_PASSED"
-        if all(item["status"] == "pass" for item in checks)
-        else "CAPABILITY_FAILED"
-    )
+    status = _service_status(checks)
     return _report("service", status, checks)
 
 

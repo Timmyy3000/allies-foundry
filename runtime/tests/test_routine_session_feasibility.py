@@ -51,6 +51,31 @@ def test_stable_separate_session_ids_preserve_profile_and_conversation_identity(
     assert all(item.session_key.startswith("allies-k-") for item in identifiers)
 
 
+@pytest.mark.parametrize(
+    "failed_check",
+    ["real_session_turns", "event_identity_attribution", "history_canary_isolation"],
+)
+def test_service_status_prefers_post_preflight_failure_over_blocked_barrier(failed_check):
+    checks = [
+        {"name": "authenticated_readiness", "status": "pass"},
+        {"name": "model_preflight", "status": "pass"},
+        {"name": failed_check, "status": "fail"},
+        {"name": "server_observable_barrier", "status": "blocked"},
+    ]
+
+    assert SMOKE._service_status(checks) == "CAPABILITY_FAILED"
+
+
+def test_service_status_keeps_setup_blocked_when_only_barrier_is_missing():
+    checks = [
+        {"name": "authenticated_readiness", "status": "pass"},
+        {"name": "model_preflight", "status": "pass"},
+        {"name": "server_observable_barrier", "status": "blocked"},
+    ]
+
+    assert SMOKE._service_status(checks) == "SETUP_BLOCKED"
+
+
 def test_owned_network_command_is_unexposed_and_allows_egress():
     command = LAUNCH.build_network_command("cld012-network")
 
