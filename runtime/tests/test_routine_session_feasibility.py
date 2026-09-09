@@ -481,6 +481,7 @@ def test_run_probe_exec_budget_covers_sequential_service_stages(
     calls = []
     runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
     monkeypatch.setattr(LAUNCH, "_wait_for_readiness", lambda *args: True)
+    probe_timeout = 60
     observed_timeout = None
 
     def bounded_probe_runner(command, **kwargs):
@@ -510,13 +511,14 @@ def test_run_probe_exec_budget_covers_sequential_service_stages(
         credential_ref="vault://cld012/hermes",
         model_profile_ref="vault://cld012/model",
         setup_timeout_seconds=1,
-        probe_timeout_seconds=1,
+        probe_timeout_seconds=probe_timeout,
         runner=bounded_probe_runner,
     )
 
     assert report["status"] == "CAPABILITY_PASSED"
-    assert observed_timeout == LAUNCH._probe_execution_timeout(1)
-    assert observed_timeout > 1 + 5
+    expected_timeout = (4 * probe_timeout) + (12 * 30) + 5
+    assert observed_timeout == expected_timeout
+    assert observed_timeout == LAUNCH._probe_execution_timeout(probe_timeout)
 
 
 @pytest.mark.parametrize(
