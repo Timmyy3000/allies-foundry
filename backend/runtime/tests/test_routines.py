@@ -5,9 +5,14 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4, uuid5
 
 import pytest
+from django.conf import settings
 from django.utils import timezone as django_timezone
 
-from runtime.exceptions import RuntimeConflictError
+from runtime.exceptions import (
+    RuntimeConflictError,
+    RuntimeFencedError,
+    RuntimeNotReadyError,
+)
 from runtime.models import (
     AttemptStatus,
     ConversationBinding,
@@ -34,12 +39,14 @@ from runtime.routine_contracts import (
     parse_routine_message,
     routine_fingerprint,
 )
+from runtime.services.attempts import fail_attempt
 from runtime.services.claims import claim_next_execution
 from runtime.services.routines import (
     PROFILE_ID_NAMESPACE,
     accept_routine_dispatch,
     append_runtime_routine_result,
     decide_routine_approval,
+    disable_routine_admission,
     enable_routine_admission,
     expire_routine_approvals,
     request_routine_approval,
@@ -48,17 +55,23 @@ from runtime.services.runtime_auth import (
     authenticate_runtime_token,
     issue_runtime_credential,
 )
+from runtime.services.runtime_releases import current_runtime_release_digest
 from runtime.services.sessions import bind_routine_session
 
 
 @pytest.fixture
-def routine_context(db):
+def routine_context(db, monkeypatch):
+    applied_images = {
+        "allies-runtime": "runtime@sha256:" + "a" * 64,
+        "hermes": "hermes@sha256:" + "b" * 64,
+    }
     workspace = Workspace.objects.create(
         tenant_ref="routine-tenant",
         fly_app_ref="routine-app",
         volume_ref="routine-volume",
         machine_ref="routine-machine",
         machine_generation=7,
+        applied_images=applied_images,
         provisioning_phase=WorkspaceProvisioningPhase.IDLE,
         ready_generation=7,
         ready_start_epoch=0,
@@ -83,9 +96,17 @@ def routine_context(db):
         profile=profile,
         cloud_conversation_ref=str(main_conversation_id),
     )
+    release_digest = current_runtime_release_digest(workspace)
+    assert release_digest is not None
+    monkeypatch.setattr(
+        settings,
+        "ALLIES_RUNTIME_ROUTINE_RELEASE_DIGEST",
+        release_digest,
+        raising=False,
+    )
     enable_routine_admission(
         workspace.id,
-        release_digest="sha256:routines-test",
+        release_digest=release_digest,
         machine_generation=workspace.machine_generation,
         runtime_start_epoch=workspace.runtime_start_epoch,
     )
@@ -99,6 +120,7 @@ def routine_context(db):
         "cloud_binding_id": cloud_binding_id,
         "main_conversation_id": main_conversation_id,
         "context": context,
+        "release_digest": release_digest,
         "base": datetime(2026, 9, 9, 8, 0, tzinfo=UTC),
     }
 
@@ -150,6 +172,93 @@ def dispatch(state, *, ordinal: int = 1) -> tuple[RoutineDispatch, RoutineExecut
     command = RoutineDispatch.model_validate(dispatch_payload(state, ordinal=ordinal))
     receipt = accept_routine_dispatch(command)
     return command, RoutineExecution.objects.get(execution_id=receipt.execution_id)
+
+
+def test_routine_admission_requires_the_approved_current_release(routine_context):
+    state = routine_context
+
+    with pytest.raises(RuntimeNotReadyError):
+        enable_routine_admission(
+            state["workspace"].id,
+            release_digest="sha256:" + "f" * 64,
+            machine_generation=state["workspace"].machine_generation,
+            runtime_start_epoch=state["workspace"].runtime_start_epoch,
+        )
+
+
+def test_disabling_admission_leaves_routines_queued_but_does_not_block_main(
+    routine_context,
+):
+    state = routine_context
+    _command, routine = dispatch(state)
+    disable_routine_admission(state["workspace"].id)
+
+    with pytest.raises(RuntimeNotReadyError):
+        claim_next_execution(state["context"], uuid4(), 3)
+
+    routine.refresh_from_db()
+    assert routine.status == RoutineRunStatus.QUEUED
+    main_execution = Execution.objects.create(
+        workspace=state["workspace"],
+        profile=state["profile"],
+        idempotency_key="main-after-admission-disable",
+        input_payload={"message": "main turn"},
+    )
+    main_claim = claim_next_execution(state["context"], uuid4(), 3)
+    assert main_claim is not None
+    assert main_claim.execution_id == main_execution.id
+    assert main_claim.routine_id is None
+
+
+def test_routine_claim_replay_rechecks_admission_gate(routine_context):
+    state = routine_context
+    _command, _routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None and claim.routine_id is not None
+    disable_routine_admission(state["workspace"].id)
+
+    with pytest.raises(RuntimeNotReadyError):
+        claim_next_execution(state["context"], claim.claim_id, 2)
+
+
+def test_stale_admission_release_fences_routine_claims(routine_context):
+    state = routine_context
+    _command, _routine = dispatch(state)
+    workspace = Workspace.objects.get(pk=state["workspace"].id)
+    target = dict(workspace.release_target)
+    target["routine_admission"] = {
+        **target["routine_admission"],
+        "release_digest": "sha256:" + "0" * 64,
+    }
+    workspace.release_target = target
+    workspace.save(update_fields=["release_target", "updated_at"])
+
+    with pytest.raises(RuntimeFencedError):
+        claim_next_execution(state["context"], uuid4(), 2)
+
+
+def test_generic_attempt_failure_is_projected_as_a_routine_result(routine_context):
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    assert claim is not None
+
+    receipt = fail_attempt(
+        state["context"],
+        claim.attempt_id,
+        claim.lease_token,
+        {"code": "worker_error", "retryable": False},
+        terminal_event={
+            "event_id": uuid4(),
+            "stream_id": claim.stream_id,
+            "sequence": 2,
+            "payload": {"code": "worker_error", "retryable": False},
+        },
+    )
+
+    assert receipt.status == "failed"
+    routine.refresh_from_db()
+    assert routine.status == RoutineRunStatus.FAILED
 
 
 def approval_decision_payload(state, routine, action, *, decision: str = "approve") -> dict:
@@ -323,6 +432,15 @@ def test_approval_wait_retires_and_reacquires_one_lease(routine_context):
     assert routine.status == RoutineRunStatus.WORKING
     assert routine.current_attempt.status == AttemptStatus.QUEUED
 
+    disable_routine_admission(state["workspace"].id)
+    with pytest.raises(RuntimeNotReadyError):
+        claim_next_execution(state["context"], uuid4(), 2)
+    enable_routine_admission(
+        state["workspace"].id,
+        release_digest=state["release_digest"],
+        machine_generation=state["workspace"].machine_generation,
+        runtime_start_epoch=state["workspace"].runtime_start_epoch,
+    )
     resumed_claim = claim_next_execution(state["context"], uuid4(), 2)
     assert resumed_claim is not None
     assert resumed_claim.lease_id == old_lease_id
@@ -407,6 +525,15 @@ def test_expired_routine_lease_reuses_one_lease_with_a_new_acquisition(routine_c
         expires_at=django_timezone.now() - timedelta(seconds=1)
     )
 
+    disable_routine_admission(state["workspace"].id)
+    with pytest.raises(RuntimeNotReadyError):
+        claim_next_execution(state["context"], uuid4(), 2)
+    enable_routine_admission(
+        state["workspace"].id,
+        release_digest=state["release_digest"],
+        machine_generation=state["workspace"].machine_generation,
+        runtime_start_epoch=state["workspace"].runtime_start_epoch,
+    )
     second_claim = claim_next_execution(state["context"], uuid4(), 2)
 
     assert second_claim is not None

@@ -126,11 +126,15 @@ class RecordingHermes:
         failure: Exception | None = None,
         ensure_failures: list[Exception] | None = None,
         bootstrap_failures: list[Exception] | None = None,
+        routine_outcome: str | None = None,
+        routine_references: object | None = None,
         order: list | None = None,
     ):
         self.failure = failure
         self.ensure_failures = list(ensure_failures or [])
         self.bootstrap_failures = list(bootstrap_failures or [])
+        self.routine_outcome = routine_outcome
+        self.routine_references = routine_references
         self.order = order
         self.ensured = []
         self.bootstraps = []
@@ -184,13 +188,18 @@ class RecordingHermes:
                 1,
                 {"text": "hello"},
             )
+            terminal_payload = {"run_id": "run-1", "status": "completed"}
+            if self.routine_outcome is not None:
+                terminal_payload["outcome"] = self.routine_outcome
+            if self.routine_references is not None:
+                terminal_payload["references"] = self.routine_references
             yield HermesEvent(
                 "execution.completed",
                 profile_key,
                 "rotated-1",
                 "run-1",
                 2,
-                {"run_id": "run-1", "status": "completed"},
+                terminal_payload,
             )
 
         return CancellableHermesStream(events())
@@ -230,7 +239,7 @@ async def test_first_turn_dispatches_once_binds_terminal_session_and_completes()
 @pytest.mark.asyncio
 async def test_routine_claim_uses_run_conversation_and_terminal_result():
     foundry = RecordingFoundry()
-    hermes = RecordingHermes()
+    hermes = RecordingHermes(routine_outcome="changed")
 
     result = await FoundryWorker(foundry, hermes).run_claim(
         claim(routine_id="routine-1")
@@ -248,6 +257,53 @@ async def test_routine_claim_uses_run_conversation_and_terminal_result():
     assert foundry.routine_results[0]["sequence"] == 3
     assert foundry.routine_results[0]["outcome"] == "changed"
     assert foundry.routine_results[0]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routine_outcome", [None, "unexpected"])
+async def test_routine_claim_requires_an_explicit_valid_terminal_outcome(routine_outcome):
+    foundry = RecordingFoundry()
+    hermes = RecordingHermes(routine_outcome=routine_outcome)
+
+    result = await FoundryWorker(foundry, hermes).run_claim(
+        claim(routine_id="routine-1")
+    )
+
+    assert result.status == "failed"
+    assert foundry.failures == []
+    assert foundry.routine_results[0]["outcome"] == "failed"
+    assert foundry.routine_results[0]["text"] == "Routine failed before completion."
+
+
+@pytest.mark.asyncio
+async def test_routine_claim_preserves_explicit_unchanged_outcome_with_text():
+    foundry = RecordingFoundry()
+    hermes = RecordingHermes(routine_outcome="unchanged")
+
+    result = await FoundryWorker(foundry, hermes).run_claim(
+        claim(routine_id="routine-1")
+    )
+
+    assert result.status == "succeeded"
+    assert foundry.routine_results[0]["outcome"] == "unchanged"
+    assert foundry.routine_results[0]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_routine_claim_turns_malformed_references_into_a_failed_result():
+    foundry = RecordingFoundry()
+    hermes = RecordingHermes(
+        routine_outcome="changed",
+        routine_references=[{"label": "missing url"}],
+    )
+
+    result = await FoundryWorker(foundry, hermes).run_claim(
+        claim(routine_id="routine-1")
+    )
+
+    assert result.status == "failed"
+    assert foundry.failures == []
+    assert foundry.routine_results[0]["outcome"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -550,6 +606,21 @@ async def test_post_dispatch_stream_failure_is_terminal_and_not_retryable():
     assert foundry.failures[0]["retryable"] is False
     assert foundry.failures[0]["sequence"] == 2
     assert foundry.stops == []
+
+
+@pytest.mark.asyncio
+async def test_routine_stream_failure_reports_a_routine_failure_not_generic_attempt_failure():
+    foundry = RecordingFoundry()
+    hermes = RecordingHermes(failure=HermesMalformedResponse())
+
+    result = await FoundryWorker(foundry, hermes).run_claim(
+        claim(routine_id="routine-1")
+    )
+
+    assert result.status == "failed"
+    assert foundry.failures == []
+    assert foundry.routine_results[0]["outcome"] == "failed"
+    assert foundry.routine_results[0]["sequence"] == 2
 
 
 @pytest.mark.asyncio

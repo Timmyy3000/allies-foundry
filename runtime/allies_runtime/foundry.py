@@ -47,6 +47,8 @@ MAX_CLAIM_SLOTS = 8
 # runtime exhausts its ordinary event budget.
 MAX_RUNTIME_EVENT_SEQUENCE = 100000
 MAX_TERMINAL_SEQUENCE = 100001
+MAX_ROUTINE_REFERENCE_COUNT = 32
+MAX_ROUTINE_TEXT_BYTES = 16 * 1024
 LEASE_SECONDS = 60.0
 DEFAULT_RENEW_INTERVAL = 20.0
 DEFAULT_STOP_SAFETY_MARGIN = 5.0
@@ -93,6 +95,29 @@ def _approval_time(value: Any) -> float:
     if parsed.tzinfo is None:
         raise HermesMalformedResponse("Hermes approval expiry was invalid")
     return parsed.timestamp()
+
+
+def _routine_references(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) > MAX_ROUTINE_REFERENCE_COUNT:
+        raise HermesMalformedResponse("Hermes routine references were malformed")
+    references: list[dict[str, str]] = []
+    for reference in value:
+        if not isinstance(reference, Mapping) or set(reference) != {"label", "url"}:
+            raise HermesMalformedResponse("Hermes routine references were malformed")
+        label = reference.get("label")
+        url = reference.get("url")
+        if (
+            not isinstance(label, str)
+            or not 1 <= len(label) <= 255
+            or "\x00" in label
+            or not isinstance(url, str)
+            or not 1 <= len(url) <= 2048
+            or "\x00" in url
+            or not url.startswith(("http://", "https://"))
+        ):
+            raise HermesMalformedResponse("Hermes routine references were malformed")
+        references.append({"label": label, "url": url})
+    return references
 
 
 class _BootstrapResponseLost(HermesError):
@@ -1669,6 +1694,30 @@ class FoundryWorker:
                 return
             await asyncio.sleep(min(self._approval_poll_interval, remaining))
 
+    async def _report_routine_failure(
+        self,
+        claim: FoundryClaim,
+        *,
+        sequence: int,
+    ) -> TerminalReceipt:
+        routine_result = getattr(self.foundry, "routine_result", None)
+        if not callable(routine_result):
+            raise HermesError("Foundry routine result endpoint was unavailable")
+        return await _retry_response_loss(
+            lambda: routine_result(
+                claim.attempt_id,
+                claim.lease_token,
+                event_id=deterministic_event_id(
+                    claim.attempt_id, claim.stream_id, sequence
+                ),
+                sequence=sequence,
+                outcome="failed",
+                text="Routine failed before completion.",
+                references=[],
+                delayed=bool(claim.payload.get("delayed", False)),
+            )
+        )
+
     async def _run_claim(self, claim: FoundryClaim) -> Any:
         stream = None
         lost = asyncio.Event()
@@ -1858,6 +1907,11 @@ class FoundryWorker:
                         "retryable": False,
                     }
                     try:
+                        if claim.routine_id is not None:
+                            return await self._report_routine_failure(
+                                claim,
+                                sequence=MAX_TERMINAL_SEQUENCE,
+                            )
                         return await _retry_response_loss(
                             lambda payload=failure_payload: self.foundry.fail(
                                 claim.attempt_id,
@@ -1872,6 +1926,15 @@ class FoundryWorker:
                         )
                     except ResponseLossError:
                         # Leave terminal reconciliation to the durable lease expiry path.
+                        if claim.routine_id is not None:
+                            try:
+                                return await self.foundry.stopped(
+                                    claim.attempt_id,
+                                    claim.lease_token,
+                                    reason="routine_result_response_lost",
+                                )
+                            except FoundryError:
+                                return None
                         return None
                     except FoundryError:
                         return None
@@ -2208,9 +2271,19 @@ class FoundryWorker:
                 routine_result = getattr(self.foundry, "routine_result", None)
                 if not callable(routine_result):
                     raise HermesError("Foundry routine result endpoint was unavailable")
+                if not isinstance(terminal.payload, Mapping):
+                    raise HermesMalformedResponse("Hermes routine result was malformed")
                 outcome = terminal.payload.get("outcome")
                 if outcome not in {"changed", "unchanged", "failed"}:
-                    outcome = "changed" if result_text else "unchanged"
+                    raise HermesMalformedResponse(
+                        "Hermes routine result outcome was invalid"
+                    )
+                references = _routine_references(
+                    terminal.payload.get("references", [])
+                )
+                routine_text = "".join(result_text) or "Routine completed without a report."
+                if len(routine_text.encode("utf-8")) > MAX_ROUTINE_TEXT_BYTES:
+                    raise HermesMalformedResponse("Hermes routine result text was too large")
                 return await _retry_response_loss(
                     lambda: routine_result(
                         claim.attempt_id,
@@ -2220,9 +2293,8 @@ class FoundryWorker:
                         ),
                         sequence=sequence,
                         outcome=outcome,
-                        text="".join(result_text)
-                        or "Routine completed without a report.",
-                        references=terminal.payload.get("references", []),
+                        text=routine_text,
+                        references=references,
                         delayed=bool(claim.payload.get("delayed", False)),
                     )
                 )
@@ -2282,6 +2354,15 @@ class FoundryWorker:
                     )
                 except FoundryError:
                     return None
+            if claim.routine_id is not None and isinstance(exc, ResponseLossError):
+                try:
+                    return await self.foundry.stopped(
+                        claim.attempt_id,
+                        claim.lease_token,
+                        reason="routine_result_response_lost",
+                    )
+                except FoundryError:
+                    return None
             failure_code = getattr(exc, "code", "runtime_error")
             # A retryable failure is only safe after the Hermes producer has
             # stopped.  Close it before issuing the durable fail/requeue.
@@ -2292,6 +2373,24 @@ class FoundryWorker:
             # failed completion at the boundary must not manufacture an
             # invalid sequence or bypass lease-expiry reconciliation.
             sequence = min(max(sequence + 1, 1), MAX_TERMINAL_SEQUENCE)
+            if claim.routine_id is not None:
+                try:
+                    return await self._report_routine_failure(
+                        claim,
+                        sequence=sequence,
+                    )
+                except ResponseLossError:
+                    lost.set()
+                    try:
+                        return await self.foundry.stopped(
+                            claim.attempt_id,
+                            claim.lease_token,
+                            reason="routine_result_response_lost",
+                        )
+                    except FoundryError:
+                        return None
+                except FoundryError:
+                    return None
             failure_payload = {
                 "code": failure_code,
                 "retryable": False,

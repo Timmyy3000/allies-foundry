@@ -41,7 +41,7 @@ from runtime.models import (
 
 from .profiles import profile_is_claim_ready
 from .retry import run_with_sqlite_lock_retry
-from .routines import routine_scope_key
+from .routines import _require_routine_admission, routine_scope_key
 from .runtime_auth import RuntimeContext
 from .runtime_readiness import require_current_runtime_ready_locked
 
@@ -144,6 +144,8 @@ def _claim_next_execution_once(
             replay.execution.profile, workspace.machine_generation
         ):
             raise RuntimeFencedError("profile lifecycle has fenced this claim")
+        if replay.execution.source_kind == "routine_dispatch":
+            _require_routine_admission(workspace)
         # Once the original lease has expired, returning its deterministic
         # token only hands the worker a claim that every mutation will reject.
         # Let the caller drop the ambiguous reservation and request a fresh
@@ -173,6 +175,7 @@ def _claim_next_execution_once(
             raise RuntimeIdempotencyConflictError(
                 "claim_id belongs to a retired machine generation"
             )
+        _require_routine_admission(workspace)
         if lease.expires_at <= timezone.now():
             return None
         return _claim_from_records(
@@ -196,6 +199,8 @@ def _claim_next_execution_once(
         .values_list("id", flat=True)
     )
     saw_unready_profile = False
+    saw_routine_not_ready = False
+    saw_routine_fenced = False
     for execution_id in candidate_ids:
         execution_hint = (
             Execution.objects.filter(pk=execution_id)
@@ -243,6 +248,15 @@ def _claim_next_execution_once(
         if not profile_is_claim_ready(profile, workspace.machine_generation):
             saw_unready_profile = True
             continue
+        if routine is not None:
+            try:
+                _require_routine_admission(workspace)
+            except RuntimeNotReadyError:
+                saw_routine_not_ready = True
+                continue
+            except RuntimeFencedError:
+                saw_routine_fenced = True
+                continue
         scope_key = routine_scope_key(routine.routine_id) if routine is not None else "main"
         if Lease.objects.select_for_update().filter(
             profile_id=profile.id,
@@ -354,6 +368,10 @@ def _claim_next_execution_once(
         )
     if saw_unready_profile:
         raise RuntimeNotReadyError("profile is not ready for runtime claims")
+    if saw_routine_fenced:
+        raise RuntimeFencedError("routine admission release is stale")
+    if saw_routine_not_ready:
+        raise RuntimeNotReadyError("routine admission is not ready")
     return None
 
 
@@ -434,6 +452,17 @@ def _reconcile_expired_lease(
         and profile_is_claim_ready(profile, workspace.machine_generation)
         and not _has_replay_checkpoint(attempt)
     )
+    if replayable and routine is not None:
+        try:
+            _require_routine_admission(workspace)
+        except RuntimeNotReadyError:
+            # Disabled admission leaves the attempt queued for a later
+            # explicitly enabled release.
+            pass
+        except RuntimeFencedError:
+            # A stale release must not be replayed by an old authority.
+            replayable = False
+            retired = True
     if replayable:
         attempt.status = (
             AttemptStatus.QUEUED if routine is not None else AttemptStatus.UNKNOWN
