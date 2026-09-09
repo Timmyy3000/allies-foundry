@@ -344,6 +344,20 @@ def test_routine_reference_limits_are_measured_in_utf8_bytes():
         )
 
 
+def test_routine_reference_composition_is_bounded_before_submission():
+    url = "https://example.test/" + "u" * (2048 - len("https://example.test/"))
+    references = [{"label": "l" * 255, "url": url} for _ in range(32)]
+
+    with pytest.raises(HermesMalformedResponse):
+        _routine_references(references, text="a" * MAX_ROUTINE_TEXT_BYTES)
+
+    with pytest.raises(HermesMalformedResponse):
+        _routine_references(references + references[:1])
+
+    with pytest.raises(HermesMalformedResponse):
+        _routine_references([], text=object())
+
+
 @pytest.mark.asyncio
 async def test_approved_routine_without_continuation_support_fails_without_replaying_prompt():
     foundry = RecordingFoundry()

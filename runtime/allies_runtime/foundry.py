@@ -49,6 +49,10 @@ MAX_RUNTIME_EVENT_SEQUENCE = 100000
 MAX_TERMINAL_SEQUENCE = 100001
 MAX_ROUTINE_REFERENCE_COUNT = 32
 MAX_ROUTINE_TEXT_BYTES = 16 * 1024
+MAX_ROUTINE_EVENT_BYTES = 64 * 1024
+# Reserve space for the fixed routine envelope and execution snapshots when
+# preflighting the variable text/reference portion in the runtime image.
+MAX_ROUTINE_RESULT_FIXED_BYTES = 4 * 1024
 LEASE_SECONDS = 60.0
 DEFAULT_RENEW_INTERVAL = 20.0
 DEFAULT_STOP_SAFETY_MARGIN = 5.0
@@ -97,7 +101,11 @@ def _approval_time(value: Any) -> float:
     return parsed.timestamp()
 
 
-def _routine_references(value: Any) -> list[dict[str, str]]:
+def _routine_references(
+    value: Any,
+    *,
+    text: str | None = None,
+) -> list[dict[str, str]]:
     if not isinstance(value, list) or len(value) > MAX_ROUTINE_REFERENCE_COUNT:
         raise HermesMalformedResponse("Hermes routine references were malformed")
     references: list[dict[str, str]] = []
@@ -117,6 +125,21 @@ def _routine_references(value: Any) -> list[dict[str, str]]:
         ):
             raise HermesMalformedResponse("Hermes routine references were malformed")
         references.append({"label": label, "url": url})
+    if text is not None:
+        if not isinstance(text, str):
+            raise HermesMalformedResponse("Hermes routine result text was malformed")
+        variable_payload = json.dumps(
+            {"references": references, "text": text},
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if (
+            len(variable_payload) + MAX_ROUTINE_RESULT_FIXED_BYTES
+            > MAX_ROUTINE_EVENT_BYTES
+        ):
+            raise HermesMalformedResponse("Hermes routine result envelope was too large")
     return references
 
 
@@ -2288,12 +2311,13 @@ class FoundryWorker:
                     raise HermesMalformedResponse(
                         "Hermes routine result outcome was invalid"
                     )
-                references = _routine_references(
-                    terminal.payload.get("references", [])
-                )
                 routine_text = "".join(result_text) or "Routine completed without a report."
                 if len(routine_text.encode("utf-8")) > MAX_ROUTINE_TEXT_BYTES:
                     raise HermesMalformedResponse("Hermes routine result text was too large")
+                references = _routine_references(
+                    terminal.payload.get("references", []),
+                    text=routine_text,
+                )
                 return await _retry_response_loss(
                     lambda: routine_result(
                         claim.attempt_id,

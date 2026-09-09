@@ -181,6 +181,8 @@ class RoutineResult(RoutineEnvelope):
         if len(self.text.encode("utf-8")) > MAX_ROUTINE_TEXT_BYTES:
             raise ValueError("result text is too large")
         _validate_text(self.title_snapshot, 255, "title snapshot")
+        if len(canonical_json_bytes(self.model_dump(mode="json"))) > MAX_ROUTINE_EVENT_BYTES:
+            raise ValueError("routine result envelope is too large")
         if self.outcome == "failed" and not self.text:
             raise ValueError("failed result requires text")
         return self
