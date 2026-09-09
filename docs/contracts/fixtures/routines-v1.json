@@ -2,7 +2,7 @@
   "contract": {
     "contract_name": "routines",
     "schema_version": "v1",
-    "content_revision": 10,
+    "content_revision": 11,
     "normative_owner": "cloud",
     "compatibility_vendor": "foundry",
     "document_path": "docs/contracts/routines-v1.md",
@@ -657,6 +657,13 @@
       "schedule_generation": 4,
       "occurrence_id": "00000000-0000-4000-8000-000000000005",
       "run_id": "00000000-0000-4000-8000-000000000006",
+      "schedule": {
+        "kind": "recurring",
+        "frequency": "weekly",
+        "local_time": "10:00:00",
+        "days_of_week": [1, 3, 5],
+        "timezone": "Europe/Berlin"
+      },
       "scheduled_at": "2026-09-11T08:00:00Z",
       "delayed": false,
       "occurrence_disposition": "admitted",
@@ -674,7 +681,7 @@
       },
       "issued_at": "2026-09-11T08:00:01Z",
       "deadline_at": "2026-09-11T08:01:01Z",
-      "fingerprint": "canonical-json-sha256:v1:24b8865729dce5ed65dfca8f6394fbd5708d0d4e157c2ae0333106493c52d210"
+      "fingerprint": "canonical-json-sha256:v1:b9eecb5fb63dda937a101dcf7dcbaf37bf5b8ee805c9df9772940940142d0257"
     },
     "receipt": {
       "schema_version": "v1",

@@ -69,10 +69,10 @@ def test_routines_v1_artifacts_match_cloud_owned_lock():
     assert lock == {
         "contract_name": "routines",
         "schema_version": "v1",
-        "content_revision": 10,
+        "content_revision": 11,
         "normative_owner": "cloud",
         "content_sha256": "d1a75807463cb16c7306acad04569a32502b333d42bbc947feb78cc82d5ec24d",
-        "fixture_sha256": "7d5b1e9cb7b2691719c89737de09058013074914bd6b3bf50391321559f59d28",
+        "fixture_sha256": "3b903d65225dde3aef9a03d0c7feffff21c1b38acba8dd2392b9adf6dc83019d",
         "hash_algorithm": "sha256",
         "hash_encoding": "utf-8-no-bom-lf-final-newline",
         "future_enforcement_owners": ["CLD-013", "FND-012", "integration"],
@@ -222,6 +222,10 @@ def test_routines_v1_management_cases_match_durable_receipts_and_separate_stale_
     assert fixture["management"]["resume"]["receipt"]["schedule_generation"] == 4
     assert fixture["schedule"]["resume"]["schedule_generation"] == 4
     assert fixture["dispatch"]["command"]["schedule_generation"] == 4
+    assert fixture["dispatch"]["command"]["schedule"] == (
+        fixture["management"]["update"]["request"]["body"]["schedule"]
+    )
+    assert fixture["dispatch"]["command"]["schedule"]["timezone"] == "Europe/Berlin"
     assert (
         fixture["management"]["resume"]["request"]["expected_revision"]
         == fixture["management"]["pause"]["receipt"]["revision"]
