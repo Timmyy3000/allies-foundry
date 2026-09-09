@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 
 import pytest
-
 from allies_runtime.errors import (
     HermesDisconnected,
     HermesMalformedResponse,
@@ -25,6 +25,7 @@ from allies_runtime.hermes import (
     MAX_MESSAGE_BYTES,
     CancellableHermesStream,
     HermesEvent,
+    _IncrementalHTTPStream,
 )
 
 
@@ -144,6 +145,7 @@ class RecordingHermes:
         self.bootstraps = []
         self.streams = []
         self.reasoning_efforts = []
+        self.routine_result_flags = []
         self.history_checks = []
 
     async def ensure_profile_session(self, profile_key, session_id, *, model):
@@ -175,13 +177,118 @@ class RecordingHermes:
         *,
         session_key,
         reasoning_effort=None,
+        routine_result=False,
     ):
         if self.order is not None:
             self.order.append("hermes.stream")
         self.streams.append((profile_key, session_id, message, session_key))
         self.reasoning_efforts.append(reasoning_effort)
+        self.routine_result_flags.append(routine_result)
         if self.failure:
             raise self.failure
+
+        if routine_result:
+            text = "".join(self.routine_text_chunks)
+            messages = [{"role": "assistant", "content": text}]
+            if self.routine_outcome is not None:
+                call_id = "call-routine-result"
+                arguments = json.dumps(
+                    {
+                        "outcome": self.routine_outcome,
+                        "text": text,
+                        "references": (
+                            []
+                            if self.routine_references is None
+                            else self.routine_references
+                        ),
+                    },
+                    separators=(",", ":"),
+                )
+                messages.extend(
+                    [
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": "allies_routine_result",
+                                        "arguments": arguments,
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": '{"status":"accepted"}',
+                        },
+                    ]
+                )
+            rows = [
+                b"event: run.started\n",
+                b'data: {"session_id":"%s","run_id":"run-1"}\n' % session_id.encode(),
+                b"\n",
+            ]
+
+            def _data(payload):
+                return (
+                    b"data: "
+                    + json.dumps(payload, separators=(",", ":")).encode()
+                    + b"\n"
+                )
+
+            for chunk in self.routine_text_chunks:
+                rows.extend(
+                    [
+                        b"event: assistant.delta\n",
+                        _data(
+                            {
+                                "session_id": session_id,
+                                "run_id": "run-1",
+                                "delta": chunk,
+                            }
+                        ),
+                        b"\n",
+                    ]
+                )
+            rows.extend(
+                [
+                    b"event: run.completed\n",
+                    _data(
+                        {
+                            "session_id": "rotated-1",
+                            "run_id": "run-1",
+                            "completed": True,
+                            "messages": messages,
+                        }
+                    ),
+                    b"\n",
+                    b"event: done\n",
+                    b'data: {"session_id":"rotated-1","run_id":"run-1"}\n',
+                    b"\n",
+                ]
+            )
+
+            class _Response:
+                def __init__(self, values):
+                    self._values = iter(values)
+
+                def readline(self, _limit):
+                    return next(self._values, b"")
+
+                def close(self):
+                    return None
+
+            return CancellableHermesStream(
+                _IncrementalHTTPStream(
+                    _Response(rows),
+                    profile_key,
+                    session_id,
+                    routine_result=True,
+                )
+            )
 
         async def events():
             for sequence, text in enumerate(self.routine_text_chunks, start=1):
@@ -194,10 +301,6 @@ class RecordingHermes:
                     {"text": text},
                 )
             terminal_payload = {"run_id": "run-1", "status": "completed"}
-            if self.routine_outcome is not None:
-                terminal_payload["outcome"] = self.routine_outcome
-            if self.routine_references is not None:
-                terminal_payload["references"] = self.routine_references
             yield HermesEvent(
                 "execution.completed",
                 profile_key,
@@ -262,6 +365,7 @@ async def test_routine_claim_uses_run_conversation_and_terminal_result():
     assert foundry.routine_results[0]["sequence"] == 3
     assert foundry.routine_results[0]["outcome"] == "changed"
     assert foundry.routine_results[0]["text"] == "hello"
+    assert hermes.routine_result_flags == [True]
 
 
 @pytest.mark.asyncio
@@ -291,6 +395,20 @@ async def test_routine_claim_preserves_explicit_unchanged_outcome_with_text():
 
     assert result.status == "succeeded"
     assert foundry.routine_results[0]["outcome"] == "unchanged"
+    assert foundry.routine_results[0]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_routine_claim_preserves_explicit_failed_outcome_from_typed_report():
+    foundry = RecordingFoundry()
+    hermes = RecordingHermes(routine_outcome="failed")
+
+    result = await FoundryWorker(foundry, hermes).run_claim(
+        claim(routine_id="routine-1")
+    )
+
+    assert result.status == "failed"
+    assert foundry.routine_results[0]["outcome"] == "failed"
     assert foundry.routine_results[0]["text"] == "hello"
 
 

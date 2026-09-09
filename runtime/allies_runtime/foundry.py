@@ -1353,10 +1353,13 @@ async def _stream_events(
     *,
     session_key: str,
     reasoning_effort: str | None = None,
+    routine_result: bool = False,
 ) -> Any:
     stream_kwargs: dict[str, Any] = {"session_key": session_key}
     if reasoning_effort is not None:
         stream_kwargs["reasoning_effort"] = reasoning_effort
+    if routine_result:
+        stream_kwargs["routine_result"] = True
     method = getattr(hermes, "stream_profile_incremental", None)
     if callable(method):
         result = method(profile_id, session_id, message, **stream_kwargs)
@@ -1884,6 +1887,7 @@ class FoundryWorker:
                 message,
                 session_key=identifiers.session_key,
                 reasoning_effort=claim.reasoning_effort,
+                routine_result=claim.routine_id is not None,
             )
             renewal = asyncio.create_task(self._renew_loop(claim, stream, lost))
             terminal: HermesEvent | None = None
@@ -2311,7 +2315,16 @@ class FoundryWorker:
                     raise HermesMalformedResponse(
                         "Hermes routine result outcome was invalid"
                     )
-                routine_text = "".join(result_text) or "Routine completed without a report."
+                typed_text = terminal.payload.get("result_text")
+                if (
+                    not isinstance(typed_text, str)
+                    or not typed_text
+                    or "references" not in terminal.payload
+                ):
+                    raise HermesMalformedResponse(
+                        "Hermes routine result was missing its typed report"
+                    )
+                routine_text = typed_text
                 if len(routine_text.encode("utf-8")) > MAX_ROUTINE_TEXT_BYTES:
                     raise HermesMalformedResponse("Hermes routine result text was too large")
                 references = _routine_references(
