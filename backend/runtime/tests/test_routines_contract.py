@@ -16,8 +16,24 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _load_json(path: Path) -> dict:
+    return json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=_reject_duplicate_keys,
+    )
+
+
 def _fixture() -> dict:
-    return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    return _load_json(FIXTURE_PATH)
 
 
 MESSAGE_PATHS = tuple(
@@ -48,15 +64,15 @@ def _at_path(value: dict, path: tuple[str, ...]) -> dict:
 
 def test_routines_v1_artifacts_match_cloud_owned_lock():
     fixture = _fixture()
-    lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+    lock = _load_json(LOCK_PATH)
 
     assert lock == {
         "contract_name": "routines",
         "schema_version": "v1",
-        "content_revision": 3,
+        "content_revision": 7,
         "normative_owner": "cloud",
-        "content_sha256": _sha256(DOCUMENT_PATH),
-        "fixture_sha256": _sha256(FIXTURE_PATH),
+        "content_sha256": "0f3ba80c9331914c18d5ff4b7b0358d2afd832a12f7d068213ab1a49f8f32fbf",
+        "fixture_sha256": "4b6ea7e917ef7df1e5a50240e6c2a87c0ba6437340de5ff750ea61697ebe6492",
         "hash_algorithm": "sha256",
         "hash_encoding": "utf-8-no-bom-lf-final-newline",
         "future_enforcement_owners": ["CLD-013", "FND-012", "integration"],
@@ -65,6 +81,8 @@ def test_routines_v1_artifacts_match_cloud_owned_lock():
     assert fixture["contract"]["schema_version"] == lock["schema_version"]
     assert fixture["contract"]["content_revision"] == lock["content_revision"]
     assert fixture["contract"]["normative_owner"] == lock["normative_owner"]
+    assert _sha256(DOCUMENT_PATH) == lock["content_sha256"]
+    assert _sha256(FIXTURE_PATH) == lock["fixture_sha256"]
 
     document_bytes = DOCUMENT_PATH.read_bytes()
     fixture_bytes = FIXTURE_PATH.read_bytes()
