@@ -28,10 +28,12 @@ from runtime.management.commands.activate_fly_workspace import (
 )
 from runtime.models import Workspace
 from runtime.routine_contracts import (
+    MAX_ROUTINE_EVENT_BYTES,
     RoutineApprovalDecision,
     RoutineCancelWait,
     RoutineDispatch,
     parse_routine_message,
+    routine_message_bytes,
 )
 from runtime.services.activity import wait_for_workspace_activity
 from runtime.services.approvals import (
@@ -635,9 +637,12 @@ def _json_body(request: HttpRequest) -> dict:
 
 
 def _routine_command(request: HttpRequest, expected_type):
+    if len(request.body) > MAX_ROUTINE_EVENT_BYTES:
+        raise RuntimeValidationError("routine message envelope is too large")
     command = parse_routine_message(_json_body(request))
     if not isinstance(command, expected_type):
         raise RuntimeValidationError("routine command kind is invalid")
+    routine_message_bytes(command)
     return command
 
 

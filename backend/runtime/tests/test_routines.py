@@ -41,6 +41,7 @@ from runtime.models import (
     WorkspaceProvisioningPhase,
 )
 from runtime.routine_contracts import (
+    MAX_ROUTINE_EVENT_BYTES,
     RoutineApprovalDecision,
     RoutineApprovalRequested,
     RoutineDispatch,
@@ -631,6 +632,24 @@ def test_routine_dispatch_endpoint_rejects_a_different_routine_kind(
         "code": "INVALID_REQUEST",
         "message": "request is invalid",
     }
+
+
+def test_routine_dispatch_endpoint_rejects_an_oversized_schedule(
+    routine_context, settings
+):
+    settings.ALLIES_CLOUD_SERVICE_TOKEN = "test-cloud-service-token"
+    payload = dispatch_payload(routine_context)
+    payload["schedule"]["metadata"] = "x" * MAX_ROUTINE_EVENT_BYTES
+    payload["fingerprint"] = routine_fingerprint(payload)
+
+    response = post_internal_routine("/api/v1/internal/routines/dispatch", payload)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "INVALID_REQUEST",
+        "message": "request is invalid",
+    }
+    assert not Execution.objects.filter(source_kind="routine_dispatch").exists()
 
 
 def test_routine_approval_endpoint_replays_and_fences_changed_idempotency(
