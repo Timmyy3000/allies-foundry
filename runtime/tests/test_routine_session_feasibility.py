@@ -51,6 +51,25 @@ def test_stable_separate_session_ids_preserve_profile_and_conversation_identity(
     assert all(item.session_key.startswith("allies-k-") for item in identifiers)
 
 
+def test_history_canary_assertions_cover_both_forbidden_markers_per_session():
+    assertions = SMOKE.HISTORY_CANARY_ASSERTIONS
+    assert len(assertions) == 6
+
+    by_session = {}
+    for session, expected, forbidden in assertions:
+        by_session.setdefault(session, {"expected": set(), "forbidden": set()})
+        by_session[session]["expected"].add(expected)
+        by_session[session]["forbidden"].add(forbidden)
+
+    assert set(by_session) == {
+        SMOKE.MAIN_CONVERSATION,
+        *SMOKE.ROUTINE_CONVERSATIONS,
+    }
+    for values in by_session.values():
+        assert len(values["expected"]) == 1
+        assert len(values["forbidden"]) == 2
+
+
 @pytest.mark.parametrize(
     "failed_check",
     ["real_session_turns", "event_identity_attribution", "history_canary_isolation"],

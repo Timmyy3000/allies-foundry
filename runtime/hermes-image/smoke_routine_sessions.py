@@ -30,6 +30,14 @@ ROUTINE_CONVERSATIONS = (
     "cld012-routine-conversation-a",
     "cld012-routine-conversation-b",
 )
+HISTORY_CANARY_ASSERTIONS = (
+    (MAIN_CONVERSATION, "CLD012_MAIN_CANARY", "CLD012_ROUTINE_A_CANARY"),
+    (MAIN_CONVERSATION, "CLD012_MAIN_CANARY", "CLD012_ROUTINE_B_CANARY"),
+    (ROUTINE_CONVERSATIONS[0], "CLD012_ROUTINE_A_CANARY", "CLD012_MAIN_CANARY"),
+    (ROUTINE_CONVERSATIONS[0], "CLD012_ROUTINE_A_CANARY", "CLD012_ROUTINE_B_CANARY"),
+    (ROUTINE_CONVERSATIONS[1], "CLD012_ROUTINE_B_CANARY", "CLD012_MAIN_CANARY"),
+    (ROUTINE_CONVERSATIONS[1], "CLD012_ROUTINE_B_CANARY", "CLD012_ROUTINE_A_CANARY"),
+)
 OFFLINE_FACT_MARKERS = (
     "CLD012_OFFLINE_FACT_A",
     "CLD012_OFFLINE_FACT_B",
@@ -962,11 +970,7 @@ async def _service_probe(timeout_seconds: float) -> dict[str, Any]:
     checks.append(_check("event_identity_attribution", "pass" if identity_ok else "fail"))
 
     canaries_ok = True
-    for name, expected, forbidden in (
-        (MAIN_CONVERSATION, "CLD012_MAIN_CANARY", "CLD012_ROUTINE_A_CANARY"),
-        (ROUTINE_CONVERSATIONS[0], "CLD012_ROUTINE_A_CANARY", "CLD012_ROUTINE_B_CANARY"),
-        (ROUTINE_CONVERSATIONS[1], "CLD012_ROUTINE_B_CANARY", "CLD012_MAIN_CANARY"),
-    ):
+    for name, expected, forbidden in HISTORY_CANARY_ASSERTIONS:
         session_id = sessions[name][0]
         try:
             canaries_ok &= await client.profile_session_matches_markers(
