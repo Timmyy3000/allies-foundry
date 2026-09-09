@@ -65,6 +65,7 @@ class Claim:
     payload: dict
     claim_id: UUID
     routine_id: UUID | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,6 +404,7 @@ def _reconcile_expired_lease(
     attempt: Attempt,
     lease: Lease,
 ) -> None:
+    now = timezone.now()
     routine = (
         RoutineExecution.objects.select_for_update().filter(
             execution_id=attempt.execution_id
@@ -451,6 +453,9 @@ def _reconcile_expired_lease(
                 current.retired_at = timezone.now()
                 current.save(update_fields=["current", "retired_at"])
         lease.current_acquisition = None
+        from .approvals import cancel_live_approval_requests
+
+        cancel_live_approval_requests(attempt, now=now)
         lease.state = LeaseState.RELEASED
         lease.save(update_fields=["current_acquisition", "state", "updated_at"])
         return
@@ -478,6 +483,10 @@ def _reconcile_expired_lease(
             routine.status = RoutineRunStatus.FAILED
             routine.terminal_receipt = {"code": "LEASE_EXPIRED"}
             routine.save(update_fields=["status", "terminal_receipt", "updated_at"])
+
+    from .approvals import cancel_live_approval_requests
+
+    cancel_live_approval_requests(attempt, now=now)
 
     if cleanup_pending or retired:
         lease.state = LeaseState.FENCED
@@ -585,6 +594,7 @@ def _claim_from_records(
         or lease.claim_id
         or attempt.id,
         routine_id=routine.routine_id if routine is not None else None,
+        reasoning_effort=settings.ALLIES_RUNTIME_REASONING_EFFORT,
     )
 
 

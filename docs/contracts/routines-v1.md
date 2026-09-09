@@ -11,7 +11,7 @@ The identity tuple is kept in `routines-v1.lock.json` and is:
 ```text
 contract_name=routines
 schema_version=v1
-content_revision=3
+content_revision=7
 content_sha256=<SHA-256 of this exact file>
 fixture_sha256=<SHA-256 of fixtures/routines-v1.json>
 ```
@@ -135,6 +135,62 @@ instruction can create immediately. A suggestion needs user agreement, and a
 missing task, timing, or IANA timezone is clarified before persistence.
 Delete confirmation is tied to the exact routine and expected revision.
 
+The deletion confirmation boundary is Cloud-owned (V14 / Phase-2). A Cloud
+confirmation challenge has this shape:
+
+```json
+{
+  "confirmation_ref": "<opaque one-shot reference>",
+  "scope": {
+    "kind": "workspace",
+    "workspace_id": "<workspace UUID>",
+    "owner_user_id": "<owner UUID>",
+    "ally_id": "<Ally UUID>",
+    "cloud_binding_id": "<binding UUID>"
+  },
+  "main_conversation_id": "<main conversation UUID>",
+  "routine_id": "<routine UUID>",
+  "expected_revision": 4,
+  "state": "unconsumed"
+}
+```
+
+`confirmation_ref` is the only confirmation field transported in a
+`routine.manage` delete request. Web, native, client, and integration layers
+may carry it only in the authenticated request and must preserve it as an
+opaque value; they must not decode, validate, issue, bypass, log, or trace the
+raw capability. If operational correlation is required, logs and traces may
+contain only a non-reversible keyed digest such as
+`HMAC-SHA-256(telemetry_key, confirmation_ref)` under a service-held key, never
+the raw value, a reversible encoding, or an unkeyed digest. Cloud/CLD-013
+validates that the reference is present and unconsumed and that its scope,
+issuing `main_conversation_id`, `routine_id`, and `expected_revision` exactly
+match the authorized delete and current routine. Successful validation marks
+the reference consumed and CAS-deletes the routine in the same transaction;
+the transaction commits one durable `MANAGEMENT_SAVED` receipt or mutates
+neither the routine nor the reference.
+
+Rejected confirmation vectors are explicit and do not burn a valid reference:
+
+| Vector | Result code | Required state effect |
+| --- | --- | --- |
+| Missing reference | `CONFIRMATION_REQUIRED` | Zero routine mutation; no reference is consumed |
+| Stale expected revision | `CONFIRMATION_STALE` | Zero routine mutation; stale reference remains unconsumed |
+| Replayed reference | `CONFIRMATION_REPLAYED` | Zero routine mutation; already-consumed reference remains consumed |
+| Foreign main conversation | `CONFIRMATION_WRONG_CONVERSATION` | Zero routine mutation; foreign reference remains unconsumed |
+| Foreign owner scope | `CONFIRMATION_WRONG_OWNER` | Zero routine mutation; foreign reference remains unconsumed |
+| Foreign workspace scope | `CONFIRMATION_WRONG_WORKSPACE` | Zero routine mutation; foreign reference remains unconsumed |
+| Foreign Ally scope | `CONFIRMATION_WRONG_ALLY` | Zero routine mutation; foreign reference remains unconsumed |
+| Foreign Cloud binding | `CONFIRMATION_WRONG_BINDING` | Zero routine mutation; foreign reference remains unconsumed |
+| Cross-routine reference | `CONFIRMATION_WRONG_ROUTINE` | Zero routine mutation; cross-routine reference remains unconsumed |
+
+This V14 / Phase-2 split is normative: Cloud/CLD-013 owns challenge issuance,
+exact-binding validation, atomic consumption, and deletion CAS; downstream
+Web/native/client/integration boundaries own only authenticated opaque-reference
+transport and digest-only trace propagation. A rejected foreign caller cannot
+consume a valid challenge, raw confirmation capabilities never enter downstream
+logs or traces, and no rejected vector returns a successful management receipt.
+
 Every successful mutation returns a durable `ManagementReceipt` with
 `outcome: "saved"`, `operation`, `routine_id`, `revision`, and the resulting
 schedule state. `MANAGEMENT_SAVED` is the stable success code for the create,
@@ -188,7 +244,7 @@ scheduled instant strictly after the Cloud database-clock resume boundary.
 `routine.dispatch` is a Cloud-to-Foundry logical command with an immutable
 snapshot of routine revision, title, full prompt, saved schedule/timezone,
 scheduled UTC instant, owner/Ally/binding, `occurrence_id`, `run_id`, both
-conversation IDs, `main_conversation_id`, and the occurrence disposition.
+conversation IDs, `main_conversation_id`, and `occurrence_disposition`.
 Cloud creates the occurrence, unique routine+scheduled-instant identity, run
 snapshot, and dispatch outbox intent in one short transaction. No network call
 is made inside that transaction. The accepted receipt means execution was
@@ -202,7 +258,7 @@ linked execution identity; a delivery retry reuses the occurrence identity.
 
 ## Results, main-chat insertion, and approval
 
-Foundry emits ordered `routine.result` or `routine.outcome` events. A result
+Foundry emits ordered `routine.result` and `routine.approval_requested` events. A result
 contains immutable correlation, routine revision/title snapshot, `outcome`,
 bounded result text, `delayed`, and typed references such as
 `{"label":"document","url":"https://example.test/document"}`. Credentials,
@@ -263,6 +319,15 @@ implemented responses in CLD-012.
 | `NOT_FOUND` | CLD-013 | Owner-scoped object is absent or unauthorized |
 | `REVISION_CONFLICT` | CLD-013 | Expected revision is stale; zero mutation |
 | `MANAGEMENT_SAVED` | CLD-013 | Management mutation durably saved and returned as a receipt |
+| `CONFIRMATION_REQUIRED` | CLD-013 | Delete confirmation reference is missing; zero mutation |
+| `CONFIRMATION_STALE` | CLD-013 | Delete confirmation targets a stale expected revision; zero mutation |
+| `CONFIRMATION_REPLAYED` | CLD-013 | Delete confirmation was already consumed; zero mutation |
+| `CONFIRMATION_WRONG_CONVERSATION` | CLD-013 | Delete confirmation is bound to another main conversation; zero mutation |
+| `CONFIRMATION_WRONG_OWNER` | CLD-013 | Delete confirmation is outside the authorized owner scope; zero mutation |
+| `CONFIRMATION_WRONG_WORKSPACE` | CLD-013 | Delete confirmation is bound to another workspace; zero mutation |
+| `CONFIRMATION_WRONG_ALLY` | CLD-013 | Delete confirmation is bound to another Ally; zero mutation |
+| `CONFIRMATION_WRONG_BINDING` | CLD-013 | Delete confirmation is bound to another Cloud binding; zero mutation |
+| `CONFIRMATION_WRONG_ROUTINE` | CLD-013 | Delete confirmation is bound to another routine; zero mutation |
 | `ROUTINE_DELETED` | CLD-013 | Candidate/mutation observes deleted routine |
 | `ROUTINE_PAUSED` | CLD-013 | Candidate observes paused recurring routine |
 | `PAUSE_UNSUPPORTED` | CLD-013 | One-time routine cannot be paused |

@@ -36,6 +36,7 @@ help:
 	@echo   make server PORT=8000
 	@echo   make shell
 	@echo   make hermes-image-build
+	@echo   make hermes-image-test
 
 sync:
 	cd $(BACKEND_DIR) && uv sync --locked
@@ -103,3 +104,14 @@ hermes-image-build: hermes-image-wheelhouse
 hermes-image-test: hermes-image-build
 	docker run --rm --entrypoint /opt/hermes/.venv/bin/python $(HERMES_IMAGE_TAG) \
 		-c 'from plugins.memory import load_memory_provider; p=load_memory_provider("allies_mnemosyne"); assert p is not None; p.initialize("smoke-session", hermes_home="/tmp/ally-smoke", profile_root="/tmp/ally-smoke", agent_identity="ally-v1-00000000000000000000000000000001", agent_context="conversation", memory_mode="context_only", tools=[]); assert p.status()["available"] is True; assert p.get_tool_schemas() == []; assert p._delegate._beam.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000; print(p.status()); p.shutdown()'
+	sh runtime/hermes-image/smoke_skills.sh $(HERMES_IMAGE_TAG)
+	docker run --rm \
+		--entrypoint /opt/hermes/.venv/bin/python \
+		--volume "$(CURDIR)/runtime/hermes-image/smoke_reasoning_override.py:/tmp/smoke-reasoning.py:ro" \
+		$(HERMES_IMAGE_TAG) \
+		/tmp/smoke-reasoning.py
+	docker run --rm \
+		--entrypoint /opt/hermes/.venv/bin/python \
+		--volume "$(CURDIR)/runtime/hermes-image/smoke_approval_endpoint.py:/tmp/smoke-approval.py:ro" \
+		$(HERMES_IMAGE_TAG) \
+		/tmp/smoke-approval.py

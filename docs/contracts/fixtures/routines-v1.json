@@ -2,7 +2,7 @@
   "contract": {
     "contract_name": "routines",
     "schema_version": "v1",
-    "content_revision": 3,
+    "content_revision": 7,
     "normative_owner": "cloud",
     "compatibility_vendor": "foundry",
     "document_path": "docs/contracts/routines-v1.md",
@@ -94,7 +94,7 @@
         "routine_id": "00000000-0000-4000-8000-000000000004",
         "revision": 1,
         "schedule_state": "active",
-        "next_run_at": "2026-09-10T07:00:00Z",
+        "next_run_at": "2026-09-11T07:00:00Z",
         "scope": {
           "kind": "workspace",
           "workspace_id": "00000000-0000-4000-8000-000000000001",
@@ -104,7 +104,7 @@
         },
         "issued_at": "2026-09-10T07:00:01Z",
         "deadline_at": "2026-09-10T07:01:01Z",
-        "fingerprint": "canonical-json-sha256:v1:8b32634856daafb57d5736828d973455754d759f216c65a17acbd613048423a7"
+        "fingerprint": "canonical-json-sha256:v1:757b8356e311da773fb9185c0fe5f6de2be18a2527dcff0ac51c253a5cd6cd0e"
       }
     },
     "update": {
@@ -152,7 +152,7 @@
         "routine_id": "00000000-0000-4000-8000-000000000004",
         "revision": 2,
         "schedule_state": "active",
-        "next_run_at": "2026-09-10T08:00:00Z",
+        "next_run_at": "2026-09-11T08:00:00Z",
         "scope": {
           "kind": "workspace",
           "workspace_id": "00000000-0000-4000-8000-000000000001",
@@ -162,7 +162,7 @@
         },
         "issued_at": "2026-09-10T07:10:01Z",
         "deadline_at": "2026-09-10T07:11:01Z",
-        "fingerprint": "canonical-json-sha256:v1:7f0f01b21fdee84e6c6fdacb486038a84eb761f871295a4c3eed31e77b227f92"
+        "fingerprint": "canonical-json-sha256:v1:643602ec2eeead3eaf4b7e10b02252531171449fe77037f9ae2f0c80043fc545"
       }
     },
     "pause": {
@@ -411,6 +411,179 @@
       }
     }
   },
+  "deletion_confirmation": {
+    "shape": {
+      "required_fields": [
+        "confirmation_ref",
+        "scope",
+        "main_conversation_id",
+        "routine_id",
+        "expected_revision",
+        "state"
+      ],
+      "state_values": ["unconsumed", "consumed"],
+      "client_transport_fields": ["confirmation_ref"],
+      "downstream_observability_fields": ["confirmation_ref_digest"],
+      "transport_rule": "authenticated_delete_request_only",
+      "binding_fields": [
+        "scope",
+        "main_conversation_id",
+        "routine_id",
+        "expected_revision"
+      ]
+    },
+    "observability": {
+      "raw_confirmation_ref_logging_allowed": false,
+      "raw_confirmation_ref_tracing_allowed": false,
+      "correlation_field": "confirmation_ref_digest",
+      "correlation_digest": "HMAC-SHA-256(telemetry_key, confirmation_ref)",
+      "digest_is_reversible": false
+    },
+    "reference_consumption_policy": "Only an exact valid reference is consumed atomically with deletion. Missing, stale, and foreign references are not consumed; a replayed reference is already consumed and remains consumed.",
+    "valid_reference": {
+      "confirmation_ref": "00000000-0000-4000-8000-000000000018",
+      "scope": {
+        "kind": "workspace",
+        "workspace_id": "00000000-0000-4000-8000-000000000001",
+        "owner_user_id": "00000000-0000-4000-8000-000000000002",
+        "ally_id": "00000000-0000-4000-8000-000000000003",
+        "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
+      },
+      "main_conversation_id": "00000000-0000-4000-8000-000000000007",
+      "routine_id": "00000000-0000-4000-8000-000000000004",
+      "expected_revision": 4,
+      "state": "unconsumed"
+    },
+    "references": {
+      "valid": {
+        "confirmation_ref": "00000000-0000-4000-8000-000000000018",
+        "scope": {
+          "kind": "workspace",
+          "workspace_id": "00000000-0000-4000-8000-000000000001",
+          "owner_user_id": "00000000-0000-4000-8000-000000000002",
+          "ally_id": "00000000-0000-4000-8000-000000000003",
+          "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
+        },
+        "main_conversation_id": "00000000-0000-4000-8000-000000000007",
+        "routine_id": "00000000-0000-4000-8000-000000000004",
+        "expected_revision": 4,
+        "state": "unconsumed"
+      },
+      "missing": null,
+      "stale": {
+        "confirmation_ref": "00000000-0000-4000-8000-00000000001b",
+        "scope": {
+          "kind": "workspace",
+          "workspace_id": "00000000-0000-4000-8000-000000000001",
+          "owner_user_id": "00000000-0000-4000-8000-000000000002",
+          "ally_id": "00000000-0000-4000-8000-000000000003",
+          "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
+        },
+        "main_conversation_id": "00000000-0000-4000-8000-000000000007",
+        "routine_id": "00000000-0000-4000-8000-000000000004",
+        "expected_revision": 3,
+        "state": "unconsumed"
+      },
+      "replayed": {
+        "confirmation_ref": "00000000-0000-4000-8000-000000000018",
+        "scope": {
+          "kind": "workspace",
+          "workspace_id": "00000000-0000-4000-8000-000000000001",
+          "owner_user_id": "00000000-0000-4000-8000-000000000002",
+          "ally_id": "00000000-0000-4000-8000-000000000003",
+          "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
+        },
+        "main_conversation_id": "00000000-0000-4000-8000-000000000007",
+        "routine_id": "00000000-0000-4000-8000-000000000004",
+        "expected_revision": 4,
+        "state": "consumed"
+      },
+      "foreign_conversation": {
+        "confirmation_ref": "00000000-0000-4000-8000-00000000001c",
+        "scope": {
+          "kind": "workspace",
+          "workspace_id": "00000000-0000-4000-8000-000000000001",
+          "owner_user_id": "00000000-0000-4000-8000-000000000002",
+          "ally_id": "00000000-0000-4000-8000-000000000003",
+          "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
+        },
+        "main_conversation_id": "00000000-0000-4000-8000-000000000025",
+        "routine_id": "00000000-0000-4000-8000-000000000004",
+        "expected_revision": 4,
+        "state": "unconsumed"
+      },
+      "foreign_owner": {
+        "confirmation_ref": "00000000-0000-4000-8000-00000000001d",
+        "scope": {
+          "kind": "workspace",
+          "workspace_id": "00000000-0000-4000-8000-000000000001",
+          "owner_user_id": "00000000-0000-4000-8000-000000000026",
+          "ally_id": "00000000-0000-4000-8000-000000000003",
+          "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
+        },
+        "main_conversation_id": "00000000-0000-4000-8000-000000000007",
+        "routine_id": "00000000-0000-4000-8000-000000000004",
+        "expected_revision": 4,
+        "state": "unconsumed"
+      },
+      "foreign_workspace": {
+        "confirmation_ref": "00000000-0000-4000-8000-00000000001f",
+        "scope": {
+          "kind": "workspace",
+          "workspace_id": "00000000-0000-4000-8000-000000000028",
+          "owner_user_id": "00000000-0000-4000-8000-000000000002",
+          "ally_id": "00000000-0000-4000-8000-000000000003",
+          "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
+        },
+        "main_conversation_id": "00000000-0000-4000-8000-000000000007",
+        "routine_id": "00000000-0000-4000-8000-000000000004",
+        "expected_revision": 4,
+        "state": "unconsumed"
+      },
+      "foreign_ally": {
+        "confirmation_ref": "00000000-0000-4000-8000-000000000020",
+        "scope": {
+          "kind": "workspace",
+          "workspace_id": "00000000-0000-4000-8000-000000000001",
+          "owner_user_id": "00000000-0000-4000-8000-000000000002",
+          "ally_id": "00000000-0000-4000-8000-000000000029",
+          "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
+        },
+        "main_conversation_id": "00000000-0000-4000-8000-000000000007",
+        "routine_id": "00000000-0000-4000-8000-000000000004",
+        "expected_revision": 4,
+        "state": "unconsumed"
+      },
+      "foreign_binding": {
+        "confirmation_ref": "00000000-0000-4000-8000-000000000021",
+        "scope": {
+          "kind": "workspace",
+          "workspace_id": "00000000-0000-4000-8000-000000000001",
+          "owner_user_id": "00000000-0000-4000-8000-000000000002",
+          "ally_id": "00000000-0000-4000-8000-000000000003",
+          "cloud_binding_id": "00000000-0000-4000-8000-00000000002a"
+        },
+        "main_conversation_id": "00000000-0000-4000-8000-000000000007",
+        "routine_id": "00000000-0000-4000-8000-000000000004",
+        "expected_revision": 4,
+        "state": "unconsumed"
+      },
+      "cross_routine": {
+        "confirmation_ref": "00000000-0000-4000-8000-00000000001e",
+        "scope": {
+          "kind": "workspace",
+          "workspace_id": "00000000-0000-4000-8000-000000000001",
+          "owner_user_id": "00000000-0000-4000-8000-000000000002",
+          "ally_id": "00000000-0000-4000-8000-000000000003",
+          "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
+        },
+        "main_conversation_id": "00000000-0000-4000-8000-000000000007",
+        "routine_id": "00000000-0000-4000-8000-000000000027",
+        "expected_revision": 4,
+        "state": "unconsumed"
+      }
+    }
+  },
   "schedule": {
     "once": {
       "kind": "once",
@@ -483,6 +656,7 @@
       "run_id": "00000000-0000-4000-8000-000000000006",
       "scheduled_at": "2026-09-11T08:00:00Z",
       "delayed": false,
+      "occurrence_disposition": "admitted",
       "main_conversation_id": "00000000-0000-4000-8000-000000000007",
       "run_conversation_id": "00000000-0000-4000-8000-000000000008",
       "cloud_binding_id": "00000000-0000-4000-8000-000000000009",
@@ -497,7 +671,7 @@
       },
       "issued_at": "2026-09-11T08:00:01Z",
       "deadline_at": "2026-09-11T08:01:01Z",
-      "fingerprint": "canonical-json-sha256:v1:9da2148698a0cd66aec397512f366b3ce35e510b04ecdbae728f3091475f74e7"
+      "fingerprint": "canonical-json-sha256:v1:55f2818da291acdd1e0fd9eba4fb000f3a1be75facd502f99077649e2add96d8"
     },
     "receipt": {
       "schema_version": "v1",
@@ -548,8 +722,8 @@
         {"label": "synthetic record", "url": "https://example.test/record/1"}
       ],
       "delayed": false,
-      "issued_at": "2026-09-11T08:02:00Z",
-      "deadline_at": "2026-09-11T08:03:00Z",
+      "issued_at": "2026-09-11T08:05:00Z",
+      "deadline_at": "2026-09-11T08:06:00Z",
       "scope": {
         "kind": "workspace",
         "workspace_id": "00000000-0000-4000-8000-000000000001",
@@ -567,7 +741,6 @@
       "event_id": "00000000-0000-4000-8000-00000000001d",
       "event_sequence": 3,
       "disposition": "applied",
-      "event_sequence": 3,
       "result_insertion": "pending",
       "insertion_watermark": null,
       "scope": {
@@ -577,8 +750,8 @@
         "ally_id": "00000000-0000-4000-8000-000000000003",
         "cloud_binding_id": "00000000-0000-4000-8000-000000000009"
       },
-      "issued_at": "2026-09-11T08:02:01Z",
-      "deadline_at": "2026-09-11T08:03:01Z",
+      "issued_at": "2026-09-11T08:05:01Z",
+      "deadline_at": "2026-09-11T08:06:01Z",
       "fingerprint": "canonical-json-sha256:v1:04e7d5cdb2634ae8bea6fe03491107230d0c3667b98c8741be4abf8f0e194655"
     },
     "outcomes": ["changed", "unchanged", "failed"],
@@ -741,6 +914,7 @@
     "inequalities": [
       ["main_conversation_id", "!=", "run_conversation_id"],
       ["run_conversation_id", "!=", "execution_id"],
+      ["main_conversation_id", "!=", "execution_id"],
       ["routine_id", "+", "scheduled_at", "unique_occurrence_key"]
     ]
   },
@@ -763,6 +937,15 @@
     {"code": "INVALID_INPUT", "enforcing_owner": "CLD-013", "terminal": false, "retry": "fix_request"},
     {"code": "NOT_FOUND", "enforcing_owner": "CLD-013", "terminal": false, "retry": "do_not_reveal_scope"},
     {"code": "REVISION_CONFLICT", "enforcing_owner": "CLD-013", "terminal": false, "retry": "refetch_and_reconfirm"},
+    {"code": "CONFIRMATION_REQUIRED", "enforcing_owner": "CLD-013", "terminal": false, "retry": "request_new_confirmation"},
+    {"code": "CONFIRMATION_STALE", "enforcing_owner": "CLD-013", "terminal": false, "retry": "request_new_confirmation"},
+    {"code": "CONFIRMATION_REPLAYED", "enforcing_owner": "CLD-013", "terminal": false, "retry": "request_new_confirmation"},
+    {"code": "CONFIRMATION_WRONG_CONVERSATION", "enforcing_owner": "CLD-013", "terminal": false, "retry": "use_issuing_conversation"},
+    {"code": "CONFIRMATION_WRONG_OWNER", "enforcing_owner": "CLD-013", "terminal": false, "retry": "do_not_reveal_scope"},
+    {"code": "CONFIRMATION_WRONG_WORKSPACE", "enforcing_owner": "CLD-013", "terminal": false, "retry": "do_not_reveal_scope"},
+    {"code": "CONFIRMATION_WRONG_ALLY", "enforcing_owner": "CLD-013", "terminal": false, "retry": "do_not_reveal_scope"},
+    {"code": "CONFIRMATION_WRONG_BINDING", "enforcing_owner": "CLD-013", "terminal": false, "retry": "do_not_reveal_scope"},
+    {"code": "CONFIRMATION_WRONG_ROUTINE", "enforcing_owner": "CLD-013", "terminal": false, "retry": "request_new_confirmation"},
     {"code": "STALE_DUE_CANDIDATE", "enforcing_owner": "CLD-013", "terminal": false, "retry": "select_fresh_candidate"},
     {"code": "OCCURRENCE_SKIPPED_ACTIVE", "enforcing_owner": "CLD-013", "terminal": true, "retry": "no_backlog"},
     {"code": "APPROVAL_EXPIRED", "enforcing_owner": "FND-012", "terminal": true, "retry": "new_authorization"},
@@ -787,7 +970,17 @@
     {"case_id": "management-update", "requirement": "future-only edit", "input": "management.update.request", "preconditions": ["owner authorized", "expected revision matches"], "actions": ["CAS revision and persist management receipt"], "expected_result_code": "MANAGEMENT_SAVED", "expected_postcondition": "new routine revision 2 saved via durable management receipt", "enforcing_owner": "CLD-013"},
     {"case_id": "management-pause", "requirement": "pause recurring schedule", "input": "management.pause.request", "preconditions": ["owner authorized", "expected revision matches", "recurring schedule"], "actions": ["CAS pause and persist management receipt"], "expected_result_code": "MANAGEMENT_SAVED", "expected_postcondition": "paused recurring schedule saved and remains discoverable via durable management receipt", "enforcing_owner": "CLD-013"},
     {"case_id": "management-resume", "requirement": "strict future resume", "input": "management.resume.request", "preconditions": ["owner authorized", "expected revision matches", "paused schedule"], "actions": ["CAS resume and persist management receipt"], "expected_result_code": "ROUTINE_RESUMED", "expected_postcondition": "active schedule saved with next run strictly future via durable management receipt", "enforcing_owner": "CLD-013"},
-    {"case_id": "management-delete", "requirement": "confirmed deletion", "input": "management.delete.request", "preconditions": ["owner authorized", "expected revision matches", "exact confirmation ref"], "actions": ["CAS delete and persist management receipt"], "expected_result_code": "MANAGEMENT_SAVED", "expected_postcondition": "deleted state saved via durable management receipt; future admission stops and results remain", "enforcing_owner": "CLD-013"},
+    {"case_id": "management-delete", "requirement": "confirmed deletion", "input": "management.delete.request", "preconditions": ["owner authorized", "expected revision matches", "unconsumed exact confirmation binding"], "actions": ["validate confirmation, CAS delete and persist management receipt"], "expected_result_code": "MANAGEMENT_SAVED", "expected_postcondition": "deleted state saved via durable management receipt; confirmation consumed atomically; future admission stops and results remain", "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-valid", "requirement": "exact one-shot deletion confirmation", "input": "deletion_confirmation.valid", "reference": "deletion_confirmation.references.valid", "preconditions": ["owner authorized", "routine revision 4", "reference unconsumed", "exact workspace/owner/Ally/binding and main-conversation binding"], "actions": ["validate exact Cloud binding", "consume confirmation and delete in one transaction"], "expected_result_code": "MANAGEMENT_SAVED", "expected_postcondition": "routine revision 5 deleted and confirmation consumed atomically; one durable management receipt", "routine_mutated": true, "confirmation_consumed": true, "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-missing", "requirement": "missing deletion confirmation", "input": "deletion_confirmation.missing", "reference": "deletion_confirmation.references.missing", "preconditions": ["confirmation_ref omitted"], "actions": ["validate delete boundary"], "expected_result_code": "CONFIRMATION_REQUIRED", "expected_postcondition": "zero routine mutation and no confirmation consumed; no success receipt", "routine_mutated": false, "confirmation_consumed": false, "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-stale", "requirement": "stale deletion confirmation", "input": "deletion_confirmation.stale", "reference": "deletion_confirmation.references.stale", "preconditions": ["reference bound to expected revision 3", "routine current revision 4"], "actions": ["validate reference revision"], "expected_result_code": "CONFIRMATION_STALE", "expected_postcondition": "zero routine mutation and stale reference remains unconsumed; no success receipt", "routine_mutated": false, "confirmation_consumed": false, "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-replayed", "requirement": "one-shot deletion confirmation replay", "input": "deletion_confirmation.replayed", "reference": "deletion_confirmation.references.replayed", "preconditions": ["reference was already consumed by prior successful deletion"], "actions": ["validate one-shot state"], "expected_result_code": "CONFIRMATION_REPLAYED", "expected_postcondition": "zero routine mutation and consumed reference remains consumed; no success receipt and no second deletion", "routine_mutated": false, "confirmation_consumed": false, "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-foreign-conversation", "requirement": "conversation-bound deletion confirmation", "input": "deletion_confirmation.foreign_conversation", "reference": "deletion_confirmation.references.foreign_conversation", "preconditions": ["main conversation differs from issuing conversation"], "actions": ["validate exact conversation binding"], "expected_result_code": "CONFIRMATION_WRONG_CONVERSATION", "expected_postcondition": "zero routine mutation and foreign reference remains unconsumed; no success receipt", "routine_mutated": false, "confirmation_consumed": false, "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-foreign-owner", "requirement": "owner-bound deletion confirmation", "input": "deletion_confirmation.foreign_owner", "reference": "deletion_confirmation.references.foreign_owner", "preconditions": ["owner scope differs from authorized owner"], "actions": ["validate exact owner scope"], "expected_result_code": "CONFIRMATION_WRONG_OWNER", "expected_postcondition": "zero routine mutation and foreign reference remains unconsumed; no success receipt", "routine_mutated": false, "confirmation_consumed": false, "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-foreign-workspace", "requirement": "workspace-bound deletion confirmation", "input": "deletion_confirmation.foreign_workspace", "reference": "deletion_confirmation.references.foreign_workspace", "preconditions": ["workspace scope differs from authorized workspace", "owner/Ally/binding scope fields match"], "actions": ["validate exact workspace scope"], "expected_result_code": "CONFIRMATION_WRONG_WORKSPACE", "expected_postcondition": "zero routine mutation and foreign reference remains unconsumed; no success receipt", "routine_mutated": false, "confirmation_consumed": false, "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-foreign-ally", "requirement": "Ally-bound deletion confirmation", "input": "deletion_confirmation.foreign_ally", "reference": "deletion_confirmation.references.foreign_ally", "preconditions": ["Ally scope differs from authorized Ally", "workspace/owner/binding scope fields match"], "actions": ["validate exact Ally scope"], "expected_result_code": "CONFIRMATION_WRONG_ALLY", "expected_postcondition": "zero routine mutation and foreign reference remains unconsumed; no success receipt", "routine_mutated": false, "confirmation_consumed": false, "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-foreign-binding", "requirement": "binding-bound deletion confirmation", "input": "deletion_confirmation.foreign_binding", "reference": "deletion_confirmation.references.foreign_binding", "preconditions": ["Cloud binding differs from authorized binding", "workspace/owner/Ally scope fields match"], "actions": ["validate exact Cloud binding"], "expected_result_code": "CONFIRMATION_WRONG_BINDING", "expected_postcondition": "zero routine mutation and foreign reference remains unconsumed; no success receipt", "routine_mutated": false, "confirmation_consumed": false, "enforcing_owner": "CLD-013"},
+    {"case_id": "delete-confirmation-cross-routine", "requirement": "routine-bound deletion confirmation", "input": "deletion_confirmation.cross_routine", "reference": "deletion_confirmation.references.cross_routine", "preconditions": ["reference routine differs from delete routine"], "actions": ["validate exact routine binding"], "expected_result_code": "CONFIRMATION_WRONG_ROUTINE", "expected_postcondition": "zero routine mutation and cross-routine reference remains unconsumed; no success receipt", "routine_mutated": false, "confirmation_consumed": false, "enforcing_owner": "CLD-013"},
     {"case_id": "discovery-owner", "requirement": "owner-scoped discovery", "input": "management.list.request", "preconditions": ["cursor owner binding"], "actions": ["page"], "expected_result_code": "NOT_FOUND", "expected_postcondition": "unauthorized object is indistinguishable from missing", "enforcing_owner": "CLD-013"},
     {"case_id": "schedule-dst-gap", "requirement": "DST gap handling", "input": "schedule.dst_gap", "preconditions": ["IANA timezone"], "actions": ["resolve local time"], "expected_result_code": "OCCURRENCE_ADMITTED", "expected_postcondition": "next valid instant selected", "enforcing_owner": "CLD-013"},
     {"case_id": "schedule-dst-fold", "requirement": "DST fold handling", "input": "schedule.dst_fold", "preconditions": ["IANA timezone"], "actions": ["resolve local time"], "expected_result_code": "OCCURRENCE_ADMITTED", "expected_postcondition": "earliest instant runs once", "enforcing_owner": "CLD-013"},

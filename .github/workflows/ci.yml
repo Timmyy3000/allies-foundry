@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [dev, staging, prod, prod-fastlane]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   push:
     branches: [dev, staging, prod, prod-fastlane]
   workflow_call:
@@ -51,6 +51,9 @@ jobs:
         run: uv sync --locked --project runtime
       - name: Run repository validation
         run: uv run --locked --project backend python scripts/validate.py
+
+      - name: Verify runtime image dependencies
+        run: docker build --tag allies/runtime:ci --file runtime/Dockerfile runtime
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5

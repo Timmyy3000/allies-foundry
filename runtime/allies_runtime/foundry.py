@@ -33,9 +33,14 @@ from .hermes import (
     HermesBootstrap,
     HermesEvent,
     stable_session_identifiers,
+    validate_reasoning_effort,
     validate_stream_message,
 )
-from .observability import build_event, emit_runtime_event
+from .observability import (
+    build_event,
+    emit_runtime_event,
+    observe_runtime_operation,
+)
 
 MAX_CLAIM_SLOTS = 8
 # Sequence 100001 is reserved for the single terminal event emitted when the
@@ -50,6 +55,12 @@ MAX_PROFILE_RECONCILIATION_RETRY_DELAY = 5.0
 MIN_IDLE_BACKOFF_SECONDS = 1.0
 MAX_IDLE_BACKOFF_SECONDS = 10.0
 IDLE_BACKOFF_JITTER_RATIO = 0.25
+POST_MATERIALIZATION_FAST_POLLS = 8
+APPROVAL_POLL_INTERVAL = 0.5
+APPROVAL_ACKNOWLEDGEMENT_SECONDS = 30.0
+MAX_APPROVAL_LIFETIME_SECONDS = 300.0
+MAX_APPROVAL_LABEL_CHARS = 120
+MAX_APPROVAL_PREVIEW_BYTES = 16 * 1024
 
 
 def _jittered_idle_delay(base: float, minimum: float) -> float:
@@ -58,6 +69,30 @@ def _jittered_idle_delay(base: float, minimum: float) -> float:
         minimum,
         bounded * (1 - random.random() * IDLE_BACKOFF_JITTER_RATIO),
     )
+
+
+def _approval_request_id(attempt_id: str, run_id: str, hermes_id: str) -> str:
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            f"allies-foundry:approval:v1:{attempt_id}:{run_id}:{hermes_id}",
+        )
+    )
+
+
+def _approval_time(value: Any) -> float:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise HermesMalformedResponse("Hermes approval expiry was invalid") from exc
+    else:
+        raise HermesMalformedResponse("Hermes approval expiry was invalid")
+    if parsed.tzinfo is None:
+        raise HermesMalformedResponse("Hermes approval expiry was invalid")
+    return parsed.timestamp()
 
 
 class _BootstrapResponseLost(HermesError):
@@ -182,6 +217,7 @@ class FoundryClaim:
     payload: Mapping[str, Any]
     claim_id: str
     routine_id: str | None = None
+    reasoning_effort: str | None = None
 
     def __repr__(self) -> str:  # pragma: no cover - defensive redaction
         return (
@@ -241,6 +277,14 @@ class RuntimeReconciliationSnapshot:
     machine_generation: int
     runtime_start_epoch: int | None
     profiles: tuple[ProfileDesiredState, ...]
+    activity_revision: int = 0
+    workspace_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityWaitReceipt:
+    revision: int
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +331,16 @@ class TerminalReceipt:
 @dataclass(frozen=True, slots=True)
 class SessionReceipt:
     session_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalStatus:
+    approval_request_id: str
+    status: str
+    decision: str | None
+    decided_at: datetime | str | None
+    acknowledgement_deadline_at: datetime | str | None
+    expires_at: datetime | str | None
 
 
 def deterministic_event_id(
@@ -651,6 +705,20 @@ class FoundryClient:
                 status=200,
                 code="MALFORMED_RESPONSE",
             )
+        if "reasoning_effort" in payload:
+            try:
+                raw_reasoning_effort = payload["reasoning_effort"]
+                reasoning_effort = validate_reasoning_effort(raw_reasoning_effort)
+                if reasoning_effort is None:
+                    raise ValueError("reasoning effort cannot be null")
+            except ValueError as exc:
+                raise FoundryError(
+                    "Foundry claim response contained an invalid reasoning effort",
+                    status=200,
+                    code="MALFORMED_RESPONSE",
+                ) from exc
+        else:
+            reasoning_effort = None
         return FoundryClaim(
             attempt_id=str(payload["attempt_id"]),
             execution_id=str(payload["execution_id"]),
@@ -672,6 +740,7 @@ class FoundryClient:
                 if payload.get("routine_id") is not None
                 else None
             ),
+            reasoning_effort=reasoning_effort,
         )
 
     async def reconciliation_snapshot(self) -> RuntimeReconciliationSnapshot:
@@ -687,6 +756,10 @@ class FoundryClient:
         rows = payload.get("profiles")
         generation = payload.get("machine_generation")
         runtime_start_epoch = payload.get("runtime_start_epoch")
+        activity_revision = payload.get("activity_revision", 0)
+        workspace_id = payload.get("workspace_id")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            workspace_id = None
         if (
             not isinstance(rows, list)
             or isinstance(generation, bool)
@@ -708,10 +781,22 @@ class FoundryClient:
                 status=200,
                 code="MALFORMED_RESPONSE",
             )
+        if (
+            isinstance(activity_revision, bool)
+            or not isinstance(activity_revision, int)
+            or activity_revision < 0
+        ):
+            raise FoundryError(
+                "Foundry profile reconciliation response was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
         snapshot = RuntimeReconciliationSnapshot(
             machine_generation=generation,
             runtime_start_epoch=runtime_start_epoch,
             profiles=tuple(_profile_desired_state(row, generation) for row in rows),
+            activity_revision=activity_revision,
+            workspace_id=workspace_id,
         )
         self.last_reconciliation_snapshot = snapshot
         return snapshot
@@ -720,6 +805,54 @@ class FoundryClient:
         """Read the current-generation, workspace-scoped profile desired state."""
 
         return (await self.reconciliation_snapshot()).profiles
+
+    async def wait_for_activity(
+        self,
+        after_revision: int,
+        wait_seconds: float,
+    ) -> ActivityWaitReceipt:
+        if (
+            isinstance(after_revision, bool)
+            or not isinstance(after_revision, int)
+            or after_revision < 0
+        ):
+            raise ValueError("after_revision must be a non-negative integer")
+        if isinstance(wait_seconds, bool):
+            raise TypeError("wait_seconds must be a positive number")
+        try:
+            wait_seconds = float(wait_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("wait_seconds must be a positive number") from exc
+        if not 0 < wait_seconds <= 5:
+            raise ValueError("wait_seconds must be greater than 0 and at most 5")
+        payload = await self._request(
+            "POST",
+            "/api/v1/runtime/activity-waits",
+            body={
+                "after_revision": after_revision,
+                "wait_seconds": wait_seconds,
+            },
+        )
+        if not payload:
+            raise FoundryError(
+                "Foundry activity wait response was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
+        revision = payload.get("revision")
+        reason = payload.get("reason")
+        if (
+            isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 0
+            or reason not in {"changed", "timeout"}
+        ):
+            raise FoundryError(
+                "Foundry activity wait response was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
+        return ActivityWaitReceipt(revision=revision, reason=reason)
 
     async def report_readiness(
         self,
@@ -836,6 +969,65 @@ class FoundryClient:
         return LeaseReceipt(
             str(payload["lease_id"]), _parse_datetime(payload.get("expires_at"))
         )
+
+    async def approval_status(
+        self,
+        attempt_id: str | UUID,
+        lease_token: str,
+        approval_request_id: str | UUID,
+    ) -> ApprovalStatus:
+        """Read one lease-bound approval and lazily reconcile its deadlines."""
+
+        try:
+            request_uuid = UUID(str(approval_request_id))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("approval_request_id must be a UUID") from exc
+        payload = await self._request(
+            "GET",
+            f"/api/v1/runtime/attempts/{attempt_id}/approval-requests/{request_uuid}",
+            lease_token=lease_token,
+        )
+        if not payload:
+            raise FoundryError(
+                "Foundry approval response was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
+        status = payload.get("status")
+        decision = payload.get("decision")
+        if status not in {
+            "pending",
+            "decision_recorded",
+            "applied",
+            "expired",
+            "cancelled",
+            "outcome_unknown",
+        } or (decision is not None and decision not in {"approve", "reject"}):
+            raise FoundryError(
+                "Foundry approval response was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
+        if "approval_request_id" not in payload or str(
+            payload["approval_request_id"]
+        ) != str(request_uuid):
+            raise FoundryError(
+                "Foundry approval identity was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
+        return ApprovalStatus(
+            approval_request_id=str(request_uuid),
+            status=status,
+            decision=decision,
+            decided_at=_parse_datetime(payload.get("decided_at")),
+            acknowledgement_deadline_at=_parse_datetime(
+                payload.get("acknowledgement_deadline_at")
+            ),
+            expires_at=_parse_datetime(payload.get("expires_at")),
+        )
+
+    poll_approval = approval_status
 
     async def event(
         self,
@@ -1112,13 +1304,17 @@ async def _stream_events(
     message: str,
     *,
     session_key: str,
+    reasoning_effort: str | None = None,
 ) -> Any:
+    stream_kwargs: dict[str, Any] = {"session_key": session_key}
+    if reasoning_effort is not None:
+        stream_kwargs["reasoning_effort"] = reasoning_effort
     method = getattr(hermes, "stream_profile_incremental", None)
     if callable(method):
-        result = method(profile_id, session_id, message, session_key=session_key)
+        result = method(profile_id, session_id, message, **stream_kwargs)
     else:
         result = hermes.stream_profile(
-            profile_id, session_id, message, session_key=session_key
+            profile_id, session_id, message, **stream_kwargs
         )
     if inspect.isawaitable(result):
         result = await result
@@ -1169,6 +1365,9 @@ class FoundryWorker:
         profile_reconcile_interval: float = DEFAULT_PROFILE_RECONCILE_INTERVAL,
         readiness_heartbeat_interval: float = 15.0,
         boot_id: str | UUID | None = None,
+        activity_wait_enabled: bool = False,
+        activity_wait_seconds: float = 5.0,
+        approval_poll_interval: float = APPROVAL_POLL_INTERVAL,
     ):
         if (
             isinstance(slots, bool)
@@ -1182,6 +1381,18 @@ class FoundryWorker:
             raise ValueError("profile reconcile interval must be positive")
         if readiness_heartbeat_interval <= 0:
             raise ValueError("readiness heartbeat interval must be positive")
+        if not isinstance(activity_wait_enabled, bool):
+            raise TypeError("activity wait enabled must be a boolean")
+        if (
+            isinstance(activity_wait_seconds, bool)
+            or not 0 < float(activity_wait_seconds) <= 5
+        ):
+            raise ValueError("activity wait seconds must be between 0 and 5")
+        if (
+            isinstance(approval_poll_interval, bool)
+            or not 0 < float(approval_poll_interval) <= 5
+        ):
+            raise ValueError("approval poll interval must be between 0 and 5")
         self.foundry = foundry
         self.hermes = hermes
         self.slots = slots
@@ -1197,8 +1408,13 @@ class FoundryWorker:
         self._readiness_heartbeat_interval = readiness_heartbeat_interval
         self.boot_id = str(boot_id or uuid4())
         self._last_readiness_report: float | None = None
+        self._activity_wait_enabled = activity_wait_enabled
+        self._activity_wait_seconds = float(activity_wait_seconds)
+        self._approval_poll_interval = float(approval_poll_interval)
+        self._activity_revision = 0
         self._active: set[asyncio.Task[Any]] = set()
         self._ambiguous_claims: dict[str, float] = {}
+        self._fast_polls_remaining = 0
         self._stopping = False
 
     @property
@@ -1209,8 +1425,25 @@ class FoundryWorker:
     def ambiguous_claim_ids(self) -> tuple[str, ...]:
         return tuple(self._ambiguous_claims)
 
+    def _observability_context(self) -> dict[str, object]:
+        fields: dict[str, object] = {"correlation_id": self.boot_id}
+        snapshot = getattr(self.foundry, "last_reconciliation_snapshot", None)
+        if snapshot is None:
+            return fields
+        workspace_id = getattr(snapshot, "workspace_id", None)
+        if workspace_id is not None:
+            fields["workspace_id"] = workspace_id
+        generation = getattr(snapshot, "machine_generation", None)
+        if generation is not None:
+            fields["generation"] = generation
+        runtime_start_epoch = getattr(snapshot, "runtime_start_epoch", None)
+        if runtime_start_epoch is not None:
+            fields["runtime_start_epoch"] = runtime_start_epoch
+        return fields
+
     async def stop(self) -> None:
         self._stopping = True
+        self._fast_polls_remaining = 0
         tasks = tuple(self._active)
         if tasks:
             for task in tasks:
@@ -1283,6 +1516,158 @@ class FoundryWorker:
                 lost.set()
                 await _close_stream(stream)
                 return
+
+    async def _wait_for_approval(
+        self,
+        claim: FoundryClaim,
+        approval_request_id: str,
+        expires_at: Any,
+        lost: asyncio.Event,
+    ) -> tuple[str, str | None, Any]:
+        """Poll Foundry while the existing lease renewer keeps the turn alive."""
+
+        expiry = _approval_time(expires_at)
+        poll = getattr(self.foundry, "approval_status", None)
+        if not callable(poll):
+            poll = getattr(self.foundry, "poll_approval", None)
+        if not callable(poll):
+            raise FoundryError(
+                "Foundry approval polling was unavailable",
+                code="APPROVAL_UNAVAILABLE",
+            )
+        if not inspect.iscoroutinefunction(poll):
+            # Approval polling is async by contract; never invoke an unbounded sync adapter.
+            raise FoundryError(
+                "Foundry approval polling must be asynchronous",
+                code="APPROVAL_UNAVAILABLE",
+            )
+        while not lost.is_set():
+            remaining = expiry - time.time()
+            if remaining <= 0:
+                return "expired", None, None
+            try:
+                status = await asyncio.wait_for(
+                    poll(
+                        claim.attempt_id,
+                        claim.lease_token,
+                        approval_request_id,
+                    ),
+                    remaining,
+                )
+            except TimeoutError:
+                return "expired", None, None
+            except (ResponseLossError, RateLimitedError, ServiceUnavailableError):
+                # The status read is idempotent; keep the bounded wait alive.
+                remaining = expiry - time.time()
+                if remaining <= 0:
+                    return "expired", None, None
+                await asyncio.sleep(min(self._approval_poll_interval, remaining))
+                continue
+            reported_request_id = getattr(status, "approval_request_id", None)
+            state = getattr(status, "status", None)
+            decision = getattr(status, "decision", None)
+            if isinstance(status, Mapping):
+                reported_request_id = status.get("approval_request_id")
+                state = status.get("status")
+                decision = status.get("decision")
+            if (
+                reported_request_id is None
+                or str(reported_request_id) != approval_request_id
+            ):
+                raise FoundryError(
+                    "Foundry approval identity was malformed",
+                    code="MALFORMED_RESPONSE",
+                )
+            if state == "decision_recorded":
+                if decision not in {"approve", "reject"}:
+                    raise FoundryError(
+                        "Foundry approval decision was malformed",
+                        code="MALFORMED_RESPONSE",
+                    )
+                acknowledgement_deadline = getattr(
+                    status, "acknowledgement_deadline_at", None
+                )
+                if isinstance(status, Mapping):
+                    acknowledgement_deadline = status.get("acknowledgement_deadline_at")
+                if acknowledgement_deadline is None:
+                    raise FoundryError(
+                        "Foundry approval acknowledgement deadline was malformed",
+                        code="MALFORMED_RESPONSE",
+                    )
+                return "decision", decision, acknowledgement_deadline
+            if state == "expired":
+                return "expired", None, None
+            if state in {"cancelled", "outcome_unknown"}:
+                return state, None, None
+            remaining = expiry - time.time()
+            if remaining <= 0:
+                return "expired", None, None
+            await asyncio.sleep(min(self._approval_poll_interval, remaining))
+        return "cancelled", None, None
+
+    async def _reconcile_hermes_approval(
+        self,
+        profile_id: str,
+        session_id: str,
+        run_id: str,
+        hermes_approval_id: str,
+        decision: str,
+        session_key: str,
+        acknowledgement_deadline: Any,
+        pending_approval: dict[str, str],
+    ) -> None:
+        """Reconcile one lost Hermes decision response without resending it."""
+
+        status_reader = getattr(self.hermes, "approval_status", None)
+        if not callable(status_reader):
+            raise HermesTimeout("Hermes approval acknowledgement was lost")
+        try:
+            deadline = _approval_time(acknowledgement_deadline)
+        except HermesMalformedResponse:
+            raise FoundryError(
+                "Foundry approval acknowledgement deadline was malformed",
+                code="MALFORMED_RESPONSE",
+            ) from None
+        expected = "approved" if decision == "approve" else "rejected"
+        while not pending_approval.get("acknowledged"):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise HermesTimeout("Hermes approval acknowledgement timed out")
+            try:
+                status_result = status_reader(
+                    profile_id,
+                    session_id,
+                    run_id,
+                    hermes_approval_id,
+                    session_key=session_key,
+                )
+                if inspect.isawaitable(status_result):
+                    status = await asyncio.wait_for(status_result, remaining)
+                else:
+                    status = status_result
+            except TimeoutError:
+                raise HermesTimeout("Hermes approval status timed out") from None
+            except (HermesTimeout, HermesDisconnected):
+                await asyncio.sleep(min(self._approval_poll_interval, remaining))
+                continue
+            state = getattr(status, "status", None)
+            outcome = getattr(status, "outcome", None)
+            if isinstance(status, Mapping):
+                state = status.get("status")
+                outcome = status.get("outcome")
+            if state == "resolved":
+                if outcome != expected:
+                    raise HermesMalformedResponse(
+                        "Hermes approval acknowledgement conflicted with decision"
+                    )
+                pending_approval["acknowledged"] = "1"
+                return
+            if state in {"expired", "cancelled"}:
+                if outcome != state:
+                    raise HermesError("Hermes approval terminal receipt was malformed")
+                pending_approval["wait_outcome"] = state
+                return
+            await asyncio.sleep(min(self._approval_poll_interval, remaining))
 
     async def _run_claim(self, claim: FoundryClaim) -> Any:
         stream = None
@@ -1425,9 +1810,11 @@ class FoundryWorker:
                 session_id,
                 message,
                 session_key=identifiers.session_key,
+                reasoning_effort=claim.reasoning_effort,
             )
             renewal = asyncio.create_task(self._renew_loop(claim, stream, lost))
             terminal: HermesEvent | None = None
+            pending_approval: dict[str, str] | None = None
             proof_hold = claim.payload.get("proof_hold_after_first_safe_event") is True
             held_after_safe_event = False
             async for event in stream:
@@ -1440,12 +1827,18 @@ class FoundryWorker:
                 if terminal is not None:
                     raise HermesError("Hermes returned an event after completion")
                 if event.name == "execution.completed":
+                    if pending_approval is not None:
+                        raise HermesMalformedResponse(
+                            "Hermes completed while approval was pending"
+                        )
                     terminal = event
                     continue
                 if event.session_id != session_id or event.name not in {
                     "message.delta",
                     "activity.started",
                     "activity.completed",
+                    "approval.request",
+                    "approval.responded",
                 }:
                     raise HermesError("Hermes event identity did not match claim")
                 if event.name == "message.delta":
@@ -1482,6 +1875,260 @@ class FoundryWorker:
                         return None
                     except FoundryError:
                         return None
+                if event.name == "approval.request":
+                    if pending_approval is not None:
+                        raise HermesMalformedResponse(
+                            "Hermes returned a second pending approval"
+                        )
+                    if set(event.payload) != {
+                        "hermes_approval_id",
+                        "action_kind",
+                        "action_label",
+                        "action_preview",
+                        "expires_at",
+                    }:
+                        raise HermesMalformedResponse(
+                            "Hermes approval request was malformed"
+                        )
+                    hermes_approval_id = event.payload.get("hermes_approval_id")
+                    action_kind = event.payload.get("action_kind")
+                    action_label = event.payload.get("action_label")
+                    action_preview = event.payload.get("action_preview")
+                    expires_at = event.payload.get("expires_at")
+                    if (
+                        not isinstance(hermes_approval_id, str)
+                        or not hermes_approval_id
+                        or action_kind
+                        not in {"terminal", "execute_code", "plugin_tool"}
+                        or not isinstance(action_label, str)
+                        or not 1 <= len(action_label) <= MAX_APPROVAL_LABEL_CHARS
+                        or "\x00" in action_label
+                        or not isinstance(action_preview, str)
+                        or not action_preview
+                        or "\x00" in action_preview
+                        or len(action_preview.encode("utf-8"))
+                        > MAX_APPROVAL_PREVIEW_BYTES
+                        or not isinstance(expires_at, str)
+                    ):
+                        raise HermesMalformedResponse(
+                            "Hermes approval request was malformed"
+                        )
+                    expiry = _approval_time(expires_at)
+                    now = time.time()
+                    if expiry <= now or expiry > now + MAX_APPROVAL_LIFETIME_SECONDS:
+                        raise HermesMalformedResponse(
+                            "Hermes approval expiry was outside the bounded window"
+                        )
+                    approval_request_id = _approval_request_id(
+                        claim.attempt_id, event.run_id, hermes_approval_id
+                    )
+                    awaiting_payload = {
+                        "approval_request_id": approval_request_id,
+                        "action_kind": action_kind,
+                        "action_label": action_label,
+                        "action_preview": action_preview,
+                        "expires_at": expires_at,
+                    }
+                    sequence += 1
+                    try:
+                        await _retry_response_loss(
+                            lambda current_sequence=sequence, current_payload=awaiting_payload: (
+                                self.foundry.event(
+                                    claim.attempt_id,
+                                    claim.lease_token,
+                                    stream_id=claim.stream_id,
+                                    sequence=current_sequence,
+                                    event_type="execution.awaiting_action",
+                                    payload=current_payload,
+                                    event_id=deterministic_event_id(
+                                        claim.attempt_id,
+                                        claim.stream_id,
+                                        current_sequence,
+                                    ),
+                                )
+                            )
+                        )
+                    except ResponseLossError:
+                        lost.set()
+                        await _close_stream(stream)
+                        try:
+                            return await self.foundry.stopped(
+                                claim.attempt_id,
+                                claim.lease_token,
+                                reason="event_response_lost",
+                            )
+                        except FoundryError:
+                            return None
+                    pending_approval = {
+                        "request_id": approval_request_id,
+                        "hermes_id": hermes_approval_id,
+                        "run_id": event.run_id,
+                        "expires_at": expires_at,
+                        "decision": "",
+                    }
+                    (
+                        wait_outcome,
+                        decision,
+                        acknowledgement_deadline,
+                    ) = await self._wait_for_approval(
+                        claim,
+                        approval_request_id,
+                        expires_at,
+                        lost,
+                    )
+                    if lost.is_set():
+                        break
+                    if wait_outcome == "outcome_unknown":
+                        raise HermesError(
+                            "Foundry approval acknowledgement was not confirmed"
+                        )
+                    if wait_outcome == "expired" or time.time() >= expiry:
+                        pending_approval["decision"] = ""
+                        pending_approval["wait_outcome"] = "expired"
+                        continue
+                    if decision is not None:
+                        try:
+                            acknowledgement_epoch = _approval_time(
+                                acknowledgement_deadline
+                            )
+                        except HermesMalformedResponse:
+                            raise FoundryError(
+                                "Foundry approval acknowledgement deadline was malformed",
+                                code="MALFORMED_RESPONSE",
+                            ) from None
+                        if min(expiry, acknowledgement_epoch) <= time.time():
+                            raise HermesError(
+                                "Foundry approval acknowledgement was not confirmed"
+                            )
+                    resolver_deadline: Any = expires_at
+                    if decision is not None and acknowledgement_epoch < expiry:
+                        resolver_deadline = acknowledgement_deadline
+                    resolver = getattr(self.hermes, "resolve_approval", None)
+                    if not callable(resolver):
+                        raise HermesError("Hermes approval resolution was unavailable")
+                    # Expiry/cancellation is resolved as a one-time reject so
+                    # the blocked guard cannot execute.  The durable Foundry
+                    # outcome remains the state returned by its poll.
+                    hermes_decision = decision or "reject"
+                    resolve_remaining = expiry - time.time()
+                    if decision is not None:
+                        resolve_remaining = min(
+                            resolve_remaining,
+                            acknowledgement_epoch - time.time(),
+                        )
+                    if resolve_remaining <= 0:
+                        raise HermesError(
+                            "Foundry approval acknowledgement was not confirmed"
+                        )
+                    try:
+                        resolved = resolver(
+                            claim.hermes_profile_key,
+                            session_id,
+                            event.run_id,
+                            hermes_approval_id,
+                            hermes_decision,
+                            session_key=identifiers.session_key,
+                            deadline_at=resolver_deadline,
+                        )
+                        if inspect.isawaitable(resolved):
+                            resolved = await asyncio.wait_for(
+                                resolved, resolve_remaining
+                            )
+                        if isinstance(resolved, Mapping) and resolved.get("status") in {
+                            "expired",
+                            "cancelled",
+                        }:
+                            pending_approval["wait_outcome"] = resolved["status"]
+                    except TimeoutError as exc:
+                        raise HermesTimeout(
+                            "Hermes approval resolution timed out"
+                        ) from exc
+                    except (HermesTimeout, HermesDisconnected):
+                        if decision is None:
+                            raise
+                        await self._reconcile_hermes_approval(
+                            claim.hermes_profile_key,
+                            session_id,
+                            event.run_id,
+                            hermes_approval_id,
+                            decision,
+                            identifiers.session_key,
+                            acknowledgement_deadline,
+                            pending_approval,
+                        )
+                    pending_approval["decision"] = decision or ""
+                    pending_approval.setdefault("wait_outcome", wait_outcome)
+                    continue
+                if event.name == "approval.responded":
+                    if pending_approval is None:
+                        raise HermesMalformedResponse(
+                            "Hermes approval response had no pending request"
+                        )
+                    if set(event.payload) != {"hermes_approval_id", "outcome"}:
+                        raise HermesMalformedResponse(
+                            "Hermes approval response was malformed"
+                        )
+                    if (
+                        event.payload.get("hermes_approval_id")
+                        != pending_approval["hermes_id"]
+                    ):
+                        raise HermesMalformedResponse(
+                            "Hermes approval response identity changed"
+                        )
+                    outcome = event.payload.get("outcome")
+                    if outcome not in {"approved", "rejected", "expired", "cancelled"}:
+                        raise HermesMalformedResponse(
+                            "Hermes approval response outcome was invalid"
+                        )
+                    decision = pending_approval.get("decision")
+                    wait_outcome = pending_approval.get("wait_outcome")
+                    if wait_outcome in {"expired", "cancelled"}:
+                        if outcome != wait_outcome:
+                            raise HermesMalformedResponse(
+                                "Hermes approval response conflicted with terminal receipt"
+                            )
+                    elif decision and outcome != (
+                        "approved" if decision == "approve" else "rejected"
+                    ):
+                        raise HermesMalformedResponse(
+                            "Hermes approval response conflicted with decision"
+                        )
+                    resolution_payload = {
+                        "approval_request_id": pending_approval["request_id"],
+                        "outcome": outcome,
+                    }
+                    sequence += 1
+                    try:
+                        await _retry_response_loss(
+                            lambda current_sequence=sequence, current_payload=resolution_payload: (
+                                self.foundry.event(
+                                    claim.attempt_id,
+                                    claim.lease_token,
+                                    stream_id=claim.stream_id,
+                                    sequence=current_sequence,
+                                    event_type="execution.approval_resolved",
+                                    payload=current_payload,
+                                    event_id=deterministic_event_id(
+                                        claim.attempt_id,
+                                        claim.stream_id,
+                                        current_sequence,
+                                    ),
+                                )
+                            )
+                        )
+                    except ResponseLossError:
+                        lost.set()
+                        await _close_stream(stream)
+                        try:
+                            return await self.foundry.stopped(
+                                claim.attempt_id,
+                                claim.lease_token,
+                                reason="event_response_lost",
+                            )
+                        except FoundryError:
+                            return None
+                    pending_approval = None
+                    continue
                 sequence += 1
                 try:
                     await _retry_response_loss(
@@ -1697,6 +2344,7 @@ class FoundryWorker:
                 "worker.started",
                 operation="worker_loop",
                 outcome="started",
+                **self._observability_context(),
             )
         )
         try:
@@ -1713,6 +2361,8 @@ class FoundryWorker:
                     duration_ms=(time.monotonic() - started_at) * 1000,
                     outcome="error",
                     error_type=type(error).__name__,
+                    error_code=getattr(error, "code", None),
+                    **self._observability_context(),
                 )
             )
             raise
@@ -1722,6 +2372,7 @@ class FoundryWorker:
                 operation="worker_loop",
                 duration_ms=(time.monotonic() - started_at) * 1000,
                 outcome="success",
+                **self._observability_context(),
             )
         )
         return results
@@ -1754,11 +2405,25 @@ class FoundryWorker:
         idle_backoff = initial_idle_delay
         poll_delay = initial_idle_delay
         retry_pending = False
-        while not self._stopping:
-            if await self._reconcile_profiles_or_wait(
-                force=True, retry_delay=poll_delay
-            ):
-                break
+        initialized = False
+        with observe_runtime_operation(
+            "worker.initialization",
+            **self._observability_context(),
+        ) as initialization:
+            while not self._stopping:
+                if await self._reconcile_profiles_or_wait(
+                    force=True, retry_delay=poll_delay
+                ):
+                    initialization.update(**self._observability_context())
+                    initialized = True
+                    break
+            if not initialized:
+                initialization.update(
+                    outcome="error",
+                    error_type="WorkerStopped",
+                    error_code="worker_stopped",
+                    reason_code="stopped",
+                )
         while not self._stopping and (max_turns is None or len(results) < max_turns):
             if not await self._reconcile_profiles_or_wait(retry_delay=poll_delay):
                 continue
@@ -1805,9 +2470,17 @@ class FoundryWorker:
                     retry_pending = False
                 if claim is None:
                     empty += 1
-                    poll_delay = _jittered_idle_delay(idle_backoff, initial_idle_delay)
-                    idle_backoff = min(MAX_IDLE_BACKOFF_SECONDS, idle_backoff * 2)
+                    if self._fast_polls_remaining:
+                        self._fast_polls_remaining -= 1
+                        idle_backoff = initial_idle_delay
+                        poll_delay = initial_idle_delay
+                    else:
+                        poll_delay = _jittered_idle_delay(
+                            idle_backoff, initial_idle_delay
+                        )
+                        idle_backoff = min(MAX_IDLE_BACKOFF_SECONDS, idle_backoff * 2)
                     break
+                self._fast_polls_remaining = 0
                 idle_backoff = initial_idle_delay
                 poll_delay = initial_idle_delay
                 task = asyncio.create_task(self._run_claim(claim))
@@ -1838,6 +2511,35 @@ class FoundryWorker:
                 continue
             if (idle_cycles is not None and empty >= idle_cycles) or self._stopping:
                 break
+            if self._activity_wait_enabled and not retry_pending and poll_delay > 1.0:
+                try:
+                    waited = await self._wait_for_activity()
+                except (FencedError, InvalidCredentialError):
+                    self._stopping = True
+                    break
+                except NotReadyError:
+                    self._profiles_reconciled = False
+                    poll_delay = _jittered_idle_delay(idle_backoff, initial_idle_delay)
+                    idle_backoff = min(MAX_IDLE_BACKOFF_SECONDS, idle_backoff * 2)
+                    await asyncio.sleep(poll_delay)
+                    continue
+                except (ResponseLossError, RateLimitedError, ServiceUnavailableError):
+                    poll_delay = _jittered_idle_delay(idle_backoff, initial_idle_delay)
+                    idle_backoff = min(MAX_IDLE_BACKOFF_SECONDS, idle_backoff * 2)
+                    await asyncio.sleep(poll_delay)
+                    continue
+                if waited is not None:
+                    self._activity_revision = max(
+                        self._activity_revision, waited.revision
+                    )
+                    if waited.reason == "changed":
+                        self._profiles_reconciled = False
+                        empty = 0
+                        idle_backoff = initial_idle_delay
+                        poll_delay = initial_idle_delay
+                        continue
+                    await asyncio.sleep(random.uniform(0.1, 0.25))
+                    continue
             await asyncio.sleep(poll_delay)
         if self._active:
             done, _ = await asyncio.wait(self._active)
@@ -1869,13 +2571,68 @@ class FoundryWorker:
                     "runtime.operation.retried",
                     operation="profile_reconciliation",
                     outcome="retry",
+                    retry_count=self._profile_reconciliation_retry_attempts,
                     error_type=type(error).__name__,
+                    error_code=getattr(error, "code", None),
+                    **self._observability_context(),
                 )
             )
-            await asyncio.sleep(bounded_delay)
+            with observe_runtime_operation(
+                "profile.reconciliation_retry_wait",
+                retry_count=self._profile_reconciliation_retry_attempts,
+                **self._observability_context(),
+            ):
+                await asyncio.sleep(bounded_delay)
             return False
         self._profile_reconciliation_retry_attempts = 0
         return True
+
+    async def _wait_for_activity(self) -> ActivityWaitReceipt | None:
+        method = getattr(self.foundry, "wait_for_activity", None)
+        if not callable(method):
+            return None
+        try:
+            result = method(self._activity_revision, self._activity_wait_seconds)
+            if inspect.isawaitable(result):
+                result = await result
+        except FoundryError as error:
+            if error.status == 422:
+                # Independently deployed servers may allow a shorter wait.
+                # Optional acceleration must never stop the runtime worker.
+                self._activity_wait_enabled = False
+                return None
+            # Older Foundry servers do not know this optional endpoint.  A
+            # malformed optional response has the same safe fallback: keep
+            # the established bounded polling loop alive.
+            if error.status == 404 or error.code == "MALFORMED_RESPONSE":
+                raise ServiceUnavailableError(
+                    "Foundry activity wait is unavailable",
+                    status=503,
+                    code="ACTIVITY_WAIT_UNAVAILABLE",
+                ) from error
+            raise
+        if result is None:
+            return None
+        if isinstance(result, ActivityWaitReceipt):
+            return result
+        if isinstance(result, Mapping):
+            revision = result.get("revision")
+            reason = result.get("reason")
+        else:
+            revision = getattr(result, "revision", None)
+            reason = getattr(result, "reason", None)
+        if (
+            isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 0
+            or reason not in {"changed", "timeout"}
+        ):
+            raise ServiceUnavailableError(
+                "Foundry activity wait response was malformed",
+                status=503,
+                code="MALFORMED_RESPONSE",
+            )
+        return ActivityWaitReceipt(revision=revision, reason=reason)
 
     async def _reconcile_profiles(self, *, force: bool = False) -> None:
         if self.profile_reconciler is None:
@@ -1889,10 +2646,20 @@ class FoundryWorker:
             < self._profile_reconcile_interval
         ):
             return
-        await self.profile_reconciler.reconcile()
+        report = await self.profile_reconciler.reconcile()
+        if getattr(report, "materialized", ()):
+            self._fast_polls_remaining = POST_MATERIALIZATION_FAST_POLLS
         self._profiles_reconciled = True
         self._last_profile_reconciliation = self._clock()
         snapshot = getattr(self.foundry, "last_reconciliation_snapshot", None)
+        if snapshot is not None:
+            activity_revision = getattr(snapshot, "activity_revision", 0)
+            if isinstance(activity_revision, int) and not isinstance(
+                activity_revision, bool
+            ):
+                self._activity_revision = max(
+                    self._activity_revision, activity_revision
+                )
         if (
             snapshot is not None
             and snapshot.runtime_start_epoch is not None
@@ -1904,25 +2671,39 @@ class FoundryWorker:
             )
         ):
             try:
-                hermes_ready = await self._hermes_ready()
+                with observe_runtime_operation(
+                    "readiness.hermes_health",
+                    **self._observability_context(),
+                ) as health_operation:
+                    hermes_ready = await self._hermes_ready()
+                    if not hermes_ready:
+                        health_operation.update(
+                            outcome="error",
+                            error_type="HermesNotReady",
+                            error_code="hermes_not_ready",
+                            reason_code="not_ready",
+                        )
+                        raise ServiceUnavailableError(
+                            "Hermes is not ready for a runtime receipt",
+                            status=503,
+                            code="HERMES_NOT_READY",
+                        )
             except HermesError as error:
                 raise ServiceUnavailableError(
                     "Hermes is not ready for a runtime receipt",
                     status=503,
                     code="HERMES_NOT_READY",
                 ) from error
-            if not hermes_ready:
-                raise ServiceUnavailableError(
-                    "Hermes is not ready for a runtime receipt",
-                    status=503,
-                    code="HERMES_NOT_READY",
-                )
             try:
-                await self.foundry.report_readiness(
-                    boot_id=self.boot_id,
-                    reconciled_generation=snapshot.machine_generation,
-                    runtime_start_epoch=snapshot.runtime_start_epoch,
-                )
+                with observe_runtime_operation(
+                    "readiness.publication",
+                    **self._observability_context(),
+                ):
+                    await self.foundry.report_readiness(
+                        boot_id=self.boot_id,
+                        reconciled_generation=snapshot.machine_generation,
+                        runtime_start_epoch=snapshot.runtime_start_epoch,
+                    )
             except FencedError as error:
                 self._profiles_reconciled = False
                 raise NotReadyError(
@@ -1961,9 +2742,14 @@ FoundrySupervisor = FoundryWorker
 
 
 __all__ = [
+    "MAX_APPROVAL_LABEL_CHARS",
+    "MAX_APPROVAL_LIFETIME_SECONDS",
+    "MAX_APPROVAL_PREVIEW_BYTES",
     "MAX_CLAIM_SLOTS",
     "MAX_RUNTIME_EVENT_SEQUENCE",
     "MAX_TERMINAL_SEQUENCE",
+    "ActivityWaitReceipt",
+    "ApprovalStatus",
     "EventReceipt",
     "FencedError",
     "FoundryClaim",

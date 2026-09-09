@@ -11,6 +11,8 @@ from pydantic import ConfigDict, Field, StrictInt, StrictStr, field_validator
 from runtime.contracts import (
     MAX_RUNTIME_EVENT_SEQUENCE,
     MAX_TERMINAL_SEQUENCE,
+    ApprovalDecisionCommand,
+    ApprovalDecisionReceipt,
     ExecutionCommand,
     ExecutionReceipt,
     FoundryEventEnvelope,
@@ -18,6 +20,8 @@ from runtime.contracts import (
 )
 
 __all__ = [
+    "ApprovalDecisionCommand",
+    "ApprovalDecisionReceipt",
     "ClaimRequest",
     "CleanupReceiptRequest",
     "CompleteRequest",
@@ -30,6 +34,8 @@ __all__ = [
     "ProfileProvisioningReceipt",
     "ProfileProvisioningRequest",
     "ReconciliationReceipt",
+    "RuntimeActivityWaitReceipt",
+    "RuntimeActivityWaitRequest",
     "RuntimeIntentReceipt",
     "RuntimeIntentRequest",
     "RuntimeReadinessReceipt",
@@ -48,7 +54,7 @@ class ClaimRequest(Schema):
 class RuntimeIntentRequest(Schema):
     model_config = ConfigDict(extra="forbid")
 
-    intent: Literal["composing_started"]
+    intent: Literal["composing_started", "ally_creation_started"]
     received_at: datetime
 
 
@@ -63,6 +69,20 @@ class RuntimeIntentReceipt(Schema):
         "rate_limited",
         "failed",
     ]
+
+
+class RuntimeActivityWaitRequest(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    after_revision: StrictInt = Field(..., ge=0)
+    wait_seconds: float = Field(..., gt=0, le=5)
+
+
+class RuntimeActivityWaitReceipt(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    revision: StrictInt = Field(..., ge=0)
+    reason: Literal["changed", "timeout"]
 
 
 class RuntimeReadinessRequest(Schema):
@@ -179,20 +199,33 @@ class ProfileProvisioningRequest(Schema):
         ...,
         min_length=1,
         max_length=200,
-        pattern=r"^[^\x00-\x1f\x7f]*$",
+        pattern=r"^[^\x00-\x09\x0b-\x1f\x7f]*$",
     )
     personality: StrictStr = Field(
         ...,
         min_length=1,
         max_length=4000,
-        pattern=r"^[^\x00-\x1f\x7f]*$",
+        pattern=r"^[^\x00-\x09\x0b-\x1f\x7f]*$",
     )
 
-    @field_validator("name", "job", "personality")
+    @field_validator("name")
     @classmethod
     def reject_prompt_control_characters(cls, value: str) -> str:
         if any(
             unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+            for character in value
+        ):
+            raise ValueError(
+                "name, job, and personality must not contain control characters"
+            )
+        return value
+
+    @field_validator("job", "personality")
+    @classmethod
+    def reject_multiline_control_characters(cls, value: str) -> str:
+        if any(
+            character != "\n"
+            and unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
             for character in value
         ):
             raise ValueError(

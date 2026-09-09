@@ -123,6 +123,7 @@ def dispatch_payload(state, *, ordinal: int = 1) -> dict:
         "run_id": str(run_id),
         "scheduled_at": base.isoformat().replace("+00:00", "Z"),
         "delayed": False,
+        "occurrence_disposition": "admitted",
         "main_conversation_id": str(state["main_conversation_id"]),
         "run_conversation_id": str(run_conversation_id),
         "cloud_binding_id": str(state["cloud_binding_id"]),

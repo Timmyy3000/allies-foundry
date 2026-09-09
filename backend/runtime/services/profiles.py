@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -21,6 +22,7 @@ from uuid import UUID, uuid4
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from observability.events import emit_event
 from runtime.exceptions import (
     RuntimeConflictError,
     RuntimeFencedError,
@@ -41,8 +43,11 @@ from runtime.models import (
 )
 from runtime.profile_keys import derive_hermes_profile_key
 
+from .activity import advance_workspace_activity
+from .provisioning_hints import ensure_provisioning_hint_delivery
 from .retry import run_with_sqlite_lock_retry
 from .runtime_auth import RuntimeContext
+from .timing import emit_timing_event
 from .validation import digest_payload, validate_nonempty
 
 PROFILE_SEED_VERSION = 1
@@ -186,6 +191,7 @@ def ensure_runtime_profile(
                         "updated_at",
                     ]
                 )
+                advance_workspace_activity(workspace)
             return ProfileProvisioningReceipt(
                 profile.id,
                 profile.hermes_profile_key,
@@ -221,6 +227,7 @@ def ensure_runtime_profile(
             raise RuntimeConflictError(
                 "profile identity conflicts with existing state"
             ) from exc
+        advance_workspace_activity(workspace)
         return ProfileProvisioningReceipt(
             profile.id,
             profile.hermes_profile_key,
@@ -265,84 +272,133 @@ def accept_materialization_receipt(
     _require_context(context)
     profile_uuid = _uuid(profile_id, "profile_id")
     operation_uuid = _uuid(operation_id, "operation_id")
-    _validate_epoch(lifecycle_epoch)
-    _validate_generation(materialized_generation)
-    _validate_digest(seed_fingerprint, "seed_fingerprint")
-    result_code = _validate_result_code(result_code)
-    if result_code not in _MATERIALIZATION_RESULT_CODES:
-        raise RuntimeValidationError("materialization result_code is not successful")
-    request_digest = digest_payload(
-        {
-            "profile_id": str(profile_uuid),
-            "operation_id": str(operation_uuid),
-            "lifecycle_epoch": lifecycle_epoch,
-            "materialized_generation": materialized_generation,
-            "seed_fingerprint": seed_fingerprint,
-            "result_code": result_code,
-        }
+    workspace_id = context.workspace_id
+    started_at = time.monotonic()
+    _emit_profile_timing(
+        "runtime.operation.started",
+        operation="runtime.profile_materialization_receipt",
+        workspace_id=workspace_id,
+        profile_id=profile_uuid,
+        correlation_id=operation_uuid,
+        outcome="started",
     )
-
-    @transaction.atomic
-    def accept_once() -> ProfileReconciliationReceipt:
-        workspace = Workspace.objects.select_for_update().get(pk=context.workspace_id)
-        _check_context_generation(workspace, context)
-        _require_ready_workspace(workspace)
-        profile = (
-            RuntimeProfile.objects.select_for_update()
-            .filter(pk=profile_uuid, workspace_id=workspace.id)
-            .first()
+    try:
+        _validate_epoch(lifecycle_epoch)
+        _validate_generation(materialized_generation)
+        _validate_digest(seed_fingerprint, "seed_fingerprint")
+        result_code = _validate_result_code(result_code)
+        if result_code not in _MATERIALIZATION_RESULT_CODES:
+            raise RuntimeValidationError(
+                "materialization result_code is not successful"
+            )
+        request_digest = digest_payload(
+            {
+                "profile_id": str(profile_uuid),
+                "operation_id": str(operation_uuid),
+                "lifecycle_epoch": lifecycle_epoch,
+                "materialized_generation": materialized_generation,
+                "seed_fingerprint": seed_fingerprint,
+                "result_code": result_code,
+            }
         )
-        if profile is None:
-            raise RuntimeValidationError("profile is not in this workspace")
-        if profile.lifecycle_state in {
-            RuntimeProfileLifecycleState.CLEANUP_PENDING,
-            RuntimeProfileLifecycleState.DEPROVISIONED,
-            RuntimeProfileLifecycleState.REPAIR_REQUIRED,
-        }:
-            raise RuntimeRepairRequiredError(
-                "profile lifecycle has fenced provisioning"
+
+        @transaction.atomic
+        def accept_once() -> ProfileReconciliationReceipt:
+            workspace = Workspace.objects.select_for_update().get(
+                pk=context.workspace_id
             )
-        if profile.hermes_profile_key_version != 1:
-            raise RuntimeRepairRequiredError(
-                "legacy Hermes profile key requires repair"
+            _check_context_generation(workspace, context)
+            _require_ready_workspace(workspace)
+            profile = (
+                RuntimeProfile.objects.select_for_update()
+                .filter(pk=profile_uuid, workspace_id=workspace.id)
+                .first()
             )
-        if profile.lifecycle_epoch != lifecycle_epoch:
-            raise RuntimeFencedError("profile lifecycle operation is stale")
-        if profile.materialization_operation_id is not None:
-            if (
-                profile.materialization_operation_id != operation_uuid
-                or profile.materialization_request_digest != request_digest
-            ):
-                raise RuntimeIdempotencyConflictError(
-                    "materialization operation conflicts with stored receipt"
+            if profile is None:
+                raise RuntimeValidationError("profile is not in this workspace")
+            if profile.lifecycle_state in {
+                RuntimeProfileLifecycleState.CLEANUP_PENDING,
+                RuntimeProfileLifecycleState.DEPROVISIONED,
+                RuntimeProfileLifecycleState.REPAIR_REQUIRED,
+            }:
+                raise RuntimeRepairRequiredError(
+                    "profile lifecycle has fenced provisioning"
                 )
-            return _materialization_receipt(profile)
-        if profile.seed_fingerprint != seed_fingerprint:
-            raise RuntimeConflictError(
-                "materialization fingerprint does not match desired state"
+            if profile.hermes_profile_key_version != 1:
+                raise RuntimeRepairRequiredError(
+                    "legacy Hermes profile key requires repair"
+                )
+            if profile.lifecycle_epoch != lifecycle_epoch:
+                raise RuntimeFencedError("profile lifecycle operation is stale")
+            if profile.materialization_operation_id is not None:
+                if (
+                    profile.materialization_operation_id != operation_uuid
+                    or profile.materialization_request_digest != request_digest
+                ):
+                    raise RuntimeIdempotencyConflictError(
+                        "materialization operation conflicts with stored receipt"
+                    )
+                ensure_provisioning_hint_delivery(workspace, profile)
+                return _materialization_receipt(profile)
+            if profile.seed_fingerprint != seed_fingerprint:
+                raise RuntimeConflictError(
+                    "materialization fingerprint does not match desired state"
+                )
+            if materialized_generation != workspace.machine_generation:
+                raise RuntimeFencedError(
+                    "materialization belongs to a retired generation"
+                )
+            profile.lifecycle_state = RuntimeProfileLifecycleState.ACTIVE
+            profile.materialized_generation = materialized_generation
+            profile.materialization_operation_id = operation_uuid
+            profile.materialization_request_digest = request_digest
+            profile.materialization_receipt_id = uuid4()
+            profile.materialization_result_code = result_code
+            profile.save(
+                update_fields=[
+                    "lifecycle_state",
+                    "materialized_generation",
+                    "materialization_operation_id",
+                    "materialization_request_digest",
+                    "materialization_receipt_id",
+                    "materialization_result_code",
+                    "updated_at",
+                ]
             )
-        if materialized_generation != workspace.machine_generation:
-            raise RuntimeFencedError("materialization belongs to a retired generation")
-        profile.lifecycle_state = RuntimeProfileLifecycleState.ACTIVE
-        profile.materialized_generation = materialized_generation
-        profile.materialization_operation_id = operation_uuid
-        profile.materialization_request_digest = request_digest
-        profile.materialization_receipt_id = uuid4()
-        profile.materialization_result_code = result_code
-        profile.save(
-            update_fields=[
-                "lifecycle_state",
-                "materialized_generation",
-                "materialization_operation_id",
-                "materialization_request_digest",
-                "materialization_receipt_id",
-                "materialization_result_code",
-                "updated_at",
-            ]
-        )
-        return _materialization_receipt(profile)
+            ensure_provisioning_hint_delivery(workspace, profile)
+            return _materialization_receipt(profile)
 
-    return run_with_sqlite_lock_retry(accept_once)
+        receipt = run_with_sqlite_lock_retry(accept_once)
+    except BaseException as error:
+        _emit_profile_timing(
+            "runtime.operation.failed",
+            operation="runtime.profile_materialization_receipt",
+            workspace_id=workspace_id,
+            profile_id=profile_uuid,
+            correlation_id=operation_uuid,
+            duration_ms=(time.monotonic() - started_at) * 1000,
+            outcome="error",
+            error_type=type(error).__name__,
+            error_code=getattr(error, "code", None),
+        )
+        raise
+
+    def emit_committed() -> None:
+        _emit_profile_timing(
+            "runtime.operation.succeeded",
+            operation="runtime.profile_materialization_receipt",
+            workspace_id=workspace_id,
+            profile_id=receipt.profile_id,
+            request_id=receipt.receipt_id,
+            correlation_id=operation_uuid,
+            duration_ms=(time.monotonic() - started_at) * 1000,
+            outcome="committed",
+            reason_code=receipt.result_code,
+            generation=receipt.materialized_generation,
+        )
+
+    transaction.on_commit(emit_committed)
+    return receipt
 
 
 def request_profile_cleanup(
@@ -429,6 +485,7 @@ def request_profile_cleanup(
                 "updated_at",
             ]
         )
+        advance_workspace_activity(workspace)
         return _cleanup_receipt(profile, active_lease_count=len(active_leases))
 
     return run_with_sqlite_lock_retry(request_once)
@@ -535,6 +592,7 @@ def accept_cleanup_receipt(
                     "updated_at",
                 ]
             )
+            advance_workspace_activity(workspace)
             return _cleanup_receipt(profile, deleted=True)
         if result_code == "repair_required" or expired:
             _fence_profile_leases(profile.id)
@@ -553,6 +611,7 @@ def accept_cleanup_receipt(
                     "updated_at",
                 ]
             )
+            advance_workspace_activity(workspace)
             return _cleanup_receipt(profile, deleted=False, active_lease_count=0)
         profile.cleanup_retry_after = min(
             profile.cleanup_expires_at
@@ -592,6 +651,14 @@ def expire_profile_cleanups(
 
     @transaction.atomic
     def expire_once(profile_id: UUID) -> ProfileReconciliationReceipt | None:
+        profile_workspace = (
+            RuntimeProfile.objects.filter(pk=profile_id)
+            .values_list("workspace_id", flat=True)
+            .first()
+        )
+        if profile_workspace is None:
+            return None
+        workspace = Workspace.objects.select_for_update().get(pk=profile_workspace)
         profile = RuntimeProfile.objects.select_for_update().get(pk=profile_id)
         if (
             profile.lifecycle_state != RuntimeProfileLifecycleState.CLEANUP_PENDING
@@ -615,6 +682,7 @@ def expire_profile_cleanups(
                 "updated_at",
             ]
         )
+        advance_workspace_activity(workspace)
         return _cleanup_receipt(profile, deleted=False, active_lease_count=0)
 
     for profile_id in profile_ids:
@@ -921,6 +989,8 @@ def _fence_profile_leases(profile_id: UUID) -> None:
         )
     )
     for lease in leases:
+        from .approvals import cancel_live_approval_requests
+
         lease.state = LeaseState.FENCED
         lease.save(update_fields=["state", "updated_at"])
         attempt = lease.attempt
@@ -935,6 +1005,7 @@ def _fence_profile_leases(profile_id: UUID) -> None:
         if execution.status == ExecutionStatus.RUNNING:
             execution.status = ExecutionStatus.FAILED
             execution.save(update_fields=["status", "updated_at"])
+        cancel_live_approval_requests(attempt)
 
 
 def _require_context(context: RuntimeContext) -> None:
@@ -1018,6 +1089,22 @@ def _memory_string_list(value: Any, name: str) -> tuple[str, ...]:
     if len(set(normalized)) != len(normalized):
         raise RuntimeValidationError(f"{name} contains duplicate values")
     return normalized
+
+
+def _emit_profile_timing(event_name: str, **fields: object) -> None:
+    """Emit a bounded profile event without changing receipt semantics."""
+
+    emit_timing_event(
+        event_name,
+        emitter=emit_event,
+        identifier_names=(
+            "workspace_id",
+            "profile_id",
+            "request_id",
+            "correlation_id",
+        ),
+        **fields,
+    )
 
 
 __all__ = [

@@ -295,9 +295,16 @@ def test_active_generation_must_have_a_ready_recorded_machine(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_fresh_activation_stays_pending_until_runtime_readiness_receipt(monkeypatch):
+@pytest.mark.parametrize("reserved", [False, True])
+@pytest.mark.parametrize("rich_enabled", [False, True])
+def test_fresh_activation_stays_pending_until_runtime_readiness_receipt(
+    monkeypatch, reserved, rich_enabled, settings
+):
+    from runtime.management.commands.activate_fly_workspace import Command
+
     configure_activation(monkeypatch)
-    tenant_ref = uuid4()
+    settings.ALLIES_RICH_APPROVALS_ENABLED = rich_enabled
+    tenant_ref = f"pool:{uuid4()}" if reserved else str(uuid4())
     workspace = Workspace.objects.create(tenant_ref=str(tenant_ref))
     provider = CommandProvider()
     patch_command_dependencies(
@@ -307,9 +314,13 @@ def test_fresh_activation_stays_pending_until_runtime_readiness_receipt(monkeypa
     )
 
     with pytest.raises(ActivationCommandError, match="readiness receipt is pending"):
-        call_command("activate_fly_workspace", str(tenant_ref))
+        if reserved:
+            Command().activate_registered_workspace(workspace.id)
+        else:
+            call_command("activate_fly_workspace", tenant_ref)
 
     workspace.refresh_from_db()
+    assert workspace.tenant_ref == tenant_ref
     assert workspace.provisioning_phase == WorkspaceProvisioningPhase.IDLE
     assert workspace.machine_generation == 1
     assert workspace.runtime_operation_state == RuntimeOperationState.AWAITING_READINESS
@@ -317,6 +328,13 @@ def test_fresh_activation_stays_pending_until_runtime_readiness_receipt(monkeypa
     assert workspace.ready_start_epoch is None
     assert workspace.ready_boot_id is None
     assert "start_machine" in provider.calls
+    runtime = next(
+        c for c in provider.last_machine_spec.containers if c.name == "allies-runtime"
+    )
+    assert (
+        runtime.environment["ALLIES_RICH_APPROVALS_ENABLED"]
+        == str(rich_enabled).lower()
+    )
 
 
 @pytest.mark.django_db

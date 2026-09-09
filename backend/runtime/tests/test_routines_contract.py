@@ -18,9 +18,9 @@ def fixture() -> dict:
 
 def test_released_contract_tuple_is_byte_stable():
     expected = {
-        "routines-v1.md": "ba05f7ee14a958524462cc31e83a05fd9f16b242efc6fea180a12ae40015547d",
-        "fixtures/routines-v1.json": "bc2fa9979a89f71ec57544bc07aa326e1bdc7b084f9c0ab1cee4c934a67d4a0a",
-        "routines-v1.lock.json": "ba9c2f5b3caf20ebbeae8e26c99740eb74402d84253341a137e5761e447d67cc",
+        "routines-v1.md": "0f3ba80c9331914c18d5ff4b7b0358d2afd832a12f7d068213ab1a49f8f32fbf",
+        "fixtures/routines-v1.json": "4b6ea7e917ef7df1e5a50240e6c2a87c0ba6437340de5ff750ea61697ebe6492",
+        "routines-v1.lock.json": "8027382ca5494ec41a54eab18f3f534228a89d63bf31cf6c0112502d46d92bc2",
     }
     for relative, digest in expected.items():
         assert hashlib.sha256((CONTRACT_ROOT / relative).read_bytes()).hexdigest() == digest

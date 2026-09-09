@@ -103,6 +103,14 @@ class RoutineDispatch(RoutineEnvelope):
     run_id: UUID
     scheduled_at: datetime
     delayed: StrictBool
+    occurrence_disposition: Literal[
+        "admitted",
+        "replay",
+        "skipped_active",
+        "delayed",
+        "recovered",
+        "cancelled",
+    ]
     main_conversation_id: UUID
     run_conversation_id: UUID
     cloud_binding_id: UUID
@@ -158,8 +166,14 @@ class RoutineResult(RoutineEnvelope):
 
     @model_validator(mode="after")
     def validate_result(self) -> RoutineResult:
-        if len({self.main_conversation_id, self.run_conversation_id}) != 2:
-            raise ValueError("routine and main conversations must differ")
+        if len(
+            {
+                self.main_conversation_id,
+                self.run_conversation_id,
+                self.execution_id,
+            }
+        ) != 3:
+            raise ValueError("routine conversations and execution must differ")
         if len(self.text.encode("utf-8")) > MAX_ROUTINE_TEXT_BYTES:
             raise ValueError("result text is too large")
         if self.outcome == "failed" and not self.text:

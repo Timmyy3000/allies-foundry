@@ -10,6 +10,8 @@ from ninja.security import HttpBearer
 from ninja_extra import NinjaExtraAPI
 
 from runtime.exceptions import (
+    ActivityWaitSaturated,
+    ActivityWaitUnavailable,
     RuntimeAuthorizationError,
     RuntimeConflictError,
     RuntimeDomainError,
@@ -25,6 +27,11 @@ from runtime.management.commands.activate_fly_workspace import (
     Command as ActivateFlyWorkspaceCommand,
 )
 from runtime.models import Workspace
+from runtime.services.activity import wait_for_workspace_activity
+from runtime.services.approvals import (
+    read_runtime_approval,
+    record_approval_decision,
+)
 from runtime.services.attempts import complete_attempt, fail_attempt
 from runtime.services.claims import claim_next_execution
 from runtime.services.events import append_runtime_event
@@ -49,6 +56,7 @@ from runtime.services.workspaces import register_workspace
 from runtime.soul import render_default_allies_soul
 
 from .schemas import (
+    ApprovalDecisionCommand,
     ClaimRequest,
     CleanupReceiptRequest,
     CompleteRequest,
@@ -57,6 +65,8 @@ from .schemas import (
     FailRequest,
     MaterializationReceiptRequest,
     ProfileProvisioningRequest,
+    RuntimeActivityWaitReceipt,
+    RuntimeActivityWaitRequest,
     RuntimeIntentReceipt,
     RuntimeIntentRequest,
     RuntimeReadinessReceipt,
@@ -109,8 +119,15 @@ def register(api: NinjaExtraAPI) -> None:
             idempotency_key = request.headers.get("Idempotency-Key", "")
             if not idempotency_key:
                 raise RuntimeValidationError("Idempotency-Key is required")
+            try:
+                UUID(idempotency_key)
+            except ValueError as exc:
+                raise RuntimeValidationError("Idempotency-Key must be a UUID") from exc
+            workspace = Workspace.objects.filter(tenant_ref=str(workspace_id)).first()
+            if workspace is None:
+                return JsonResponse({"status": "first_provision_required"}, status=200)
             receipt = request_runtime_intent(
-                workspace_id,
+                workspace.id,
                 payload.intent,
                 idempotency_key,
                 payload.received_at,
@@ -155,10 +172,28 @@ def register(api: NinjaExtraAPI) -> None:
                     "workspace_id": str(context.workspace_id),
                     "machine_generation": context.machine_generation,
                     "runtime_start_epoch": workspace.runtime_start_epoch,
+                    "activity_revision": workspace.activity_revision,
                     "profiles": [_profile_json(profile) for profile in profiles],
                 },
                 status=200,
             )
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.post("/runtime/activity-waits", auth=None)
+    def activity_wait(request: HttpRequest, payload: RuntimeActivityWaitRequest):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            receipt = wait_for_workspace_activity(
+                context,
+                payload.after_revision,
+                payload.wait_seconds,
+            )
+            response = RuntimeActivityWaitReceipt(
+                revision=receipt.revision,
+                reason=receipt.reason,
+            )
+            return JsonResponse(response.model_dump(mode="json"), status=200)
         except RuntimeDomainError as exc:
             return _error(exc)
 
@@ -333,6 +368,43 @@ def register(api: NinjaExtraAPI) -> None:
             )
         except RuntimeDomainError as exc:
             return _execution_error(exc)
+
+    @api.post(
+        "/internal/approvals/{approval_request_id}/decision", auth=_cloud_service_auth
+    )
+    def approval_decision(
+        request: HttpRequest,
+        approval_request_id: UUID,
+        payload: ApprovalDecisionCommand,
+    ):
+        try:
+            if payload.approval_request_id != approval_request_id:
+                raise RuntimeValidationError("approval identity does not match path")
+            receipt = record_approval_decision(payload)
+            return JsonResponse(receipt.model_dump(mode="json"), status=200)
+        except RuntimeDomainError as exc:
+            return _execution_error(exc)
+
+    @api.get(
+        "/runtime/attempts/{attempt_id}/approval-requests/{approval_request_id}",
+        auth=None,
+    )
+    def approval_status(
+        request: HttpRequest,
+        attempt_id: UUID,
+        approval_request_id: UUID,
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            status = read_runtime_approval(
+                context,
+                attempt_id,
+                _lease_token(request),
+                approval_request_id,
+            )
+            return JsonResponse(_approval_status_json(status), status=200)
+        except RuntimeDomainError as exc:
+            return _error(exc)
 
     @api.post("/runtime/attempts/{attempt_id}/lease/renew", auth=None)
     def renew(request: HttpRequest, attempt_id):
@@ -598,8 +670,14 @@ def _lease_token(request: HttpRequest) -> str:
 def _error(exc: RuntimeDomainError) -> JsonResponse:
     if isinstance(exc, RuntimeAuthorizationError):
         status = 401
+    elif isinstance(exc, RuntimeNotFoundError):
+        status = 404
     elif isinstance(exc, RuntimeValidationError):
         status = 422
+    elif isinstance(exc, ActivityWaitSaturated):
+        status = 429
+    elif isinstance(exc, ActivityWaitUnavailable):
+        status = 503
     else:
         status = 409
     return JsonResponse(
@@ -626,6 +704,7 @@ def _claim_json(claim):
         "profile_id": str(claim.profile_id),
         "hermes_profile_key": claim.hermes_profile_key,
         "model": claim.model,
+        "reasoning_effort": claim.reasoning_effort,
         "conversation_id": claim.conversation_id,
         "session_id": claim.session_id,
         "stream_id": claim.stream_id,
@@ -645,6 +724,21 @@ def _terminal_json(receipt):
         "receipt_id": str(receipt.receipt_id),
         "requeued": receipt.requeued,
         "receipt": receipt.receipt,
+    }
+
+
+def _approval_status_json(status):
+    return {
+        "approval_request_id": str(status.approval_request_id),
+        "status": status.status,
+        "decision": status.decision,
+        "decided_at": _timestamp(status.decided_at) if status.decided_at else None,
+        "acknowledgement_deadline_at": (
+            _timestamp(status.acknowledgement_deadline_at)
+            if status.acknowledgement_deadline_at
+            else None
+        ),
+        "expires_at": _timestamp(status.expires_at),
     }
 
 

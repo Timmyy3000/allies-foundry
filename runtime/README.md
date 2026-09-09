@@ -77,6 +77,50 @@ the lease unresolved. A committed failure is already terminal; otherwise
 claim-time lease expiry publishes one nonretryable `lease_expired` terminal
 at the reserved sequence, without replaying the execution.
 
+## Managed reasoning effort
+
+Foundry supplies the optional `reasoning_effort` claim metadata for
+Allies-originated turns. The initial setting is `xhigh`, configured with
+`ALLIES_RUNTIME_REASONING_EFFORT`; the only accepted values are `high` and
+`xhigh`. Foundry validates the setting at startup and samples it when each
+claim response is built. A replay before dispatch may therefore use the value
+from the current process configuration, while a dispatched turn keeps the
+value carried by its claim until completion.
+
+The runtime forwards a present value to Hermes as
+`model_options.reasoning={"enabled":true,"effort":"<value>"}` on both
+buffered and incremental session streams, including existing sessions. A
+claim without this optional field keeps the legacy request body. Invalid
+present values fail before the Hermes request. The managed request value
+intentionally takes precedence for the turn; profile settings remain stored
+and are not rewritten or rematerialized. Session creation continues to use
+the profile's existing model, currently `gpt-5.6-luna`.
+
+After a compatible `allies-runtime` image is adopted, changing the Foundry
+setting and reloading Foundry processes updates later turns without rebuilding
+the runtime image or changing profiles. Older runtime images ignore the new
+claim field, so they must be replaced before existing Allies receive managed
+reasoning. Restore the prior accepted value and reload Foundry to roll back
+future turns; in-flight turns retain their sampled effort.
+
+## Approval rollout
+
+Approval consumers must be compatible before the producer is enabled: deploy
+Cloud, Foundry, and Interface support first, then publish the derived Hermes
+and `allies-runtime` images together. Existing profile and bootstrap
+credential references are reused; no credential migration is part of this
+rollout. Rich approval production is enabled by default. Foundry-managed activation
+and image replacement carry the same `ALLIES_RICH_APPROVALS_ENABLED` setting
+into the runtime container. Set it to `false` in the Foundry environment to
+disable production; do not mutate individual Machines. The setting is read
+when an adoption or replacement spec is built and applies to newly managed
+Machines.
+
+An approval already pending in an older image cannot be resumed
+automatically. Ask for a new live approval request after the compatible image
+is running; the runtime never replays a tool call or carries an old consent
+across that boundary.
+
 Foundry delivery retains the canonical event source for repair. After eight
 retryable attempts it rebuilds and verifies the envelope, reuses
 `PENDING` after a 300-second delay, and fences callbacks with the repair cycle
@@ -86,6 +130,8 @@ event IDs without changing state; `--confirm` is required to redrive an
 exhausted row.
 
 Idle claim polling starts at one second and grows exponentially through 2, 4,
-8, and 10 seconds with bounded jitter. A claimed execution or a recovered
+8, and 10 seconds with bounded jitter. When reconciliation materializes one or
+more profiles, successful empty claims use the one-second minimum for eight
+polls before normal idle backoff resumes. A claimed execution or a recovered
 retryable claim response resets the delay; active slots refill immediately when
 work completes. Readiness probing still uses its separate startup retry loop.

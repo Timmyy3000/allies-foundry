@@ -6,7 +6,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from runtime.contracts import MAX_RUNTIME_EVENT_SEQUENCE, MAX_TERMINAL_SEQUENCE
+from runtime.contracts import (
+    MAX_RUNTIME_EVENT_SEQUENCE,
+    MAX_TERMINAL_SEQUENCE,
+    _activity_wire_payload,
+    _validate_event_payload,
+)
 from runtime.exceptions import (
     RuntimeAuthorizationError,
     RuntimeConflictError,
@@ -163,14 +168,11 @@ def _runtime_event_payload(event_type: str, payload: dict) -> dict:
             raise RuntimeValidationError("dispatch event payload is invalid")
         return dict(payload)
     if event_type == "execution.awaiting_action":
-        action_kind = payload.get("action_kind")
-        if (
-            set(payload) != {"action_kind"}
-            or not isinstance(action_kind, str)
-            or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", action_kind)
-        ):
-            raise RuntimeValidationError("awaiting-action payload is invalid")
-        return {"action_kind": action_kind}
+        _validate_event_payload(event_type, payload)
+        return dict(payload)
+    if event_type == "execution.approval_resolved":
+        _validate_event_payload(event_type, payload)
+        return dict(payload)
     if event_type == "execution.stopped":
         reason = payload.get("reason")
         if (
@@ -188,27 +190,23 @@ def _runtime_event_payload(event_type: str, payload: dict) -> dict:
             raise RuntimeValidationError("message event payload is too large")
         return {"text": text}
     if event_type == "activity.started":
-        activity_id = payload.get("activity_id")
         if (
-            set(payload) != {"activity_id", "kind"}
-            or not isinstance(activity_id, str)
-            or not activity_id
-            or len(activity_id) > 128
-            or payload.get("kind") != "tool"
+            set(payload) == {"activity_id", "kind"}
+            and isinstance(payload.get("activity_id"), str)
+            and 0 < len(payload["activity_id"]) <= 128
+            and payload.get("kind") == "tool"
         ):
-            raise RuntimeValidationError("activity start payload is invalid")
-        return {"activity_id": activity_id, "kind": "tool"}
+            return dict(payload)
+        return _activity_wire_payload(payload, completed=False)
     if event_type == "activity.completed":
-        activity_id = payload.get("activity_id")
         if (
-            set(payload) != {"activity_id", "status"}
-            or not isinstance(activity_id, str)
-            or not activity_id
-            or len(activity_id) > 128
-            or payload.get("status") != "completed"
+            set(payload) == {"activity_id", "status"}
+            and isinstance(payload.get("activity_id"), str)
+            and 0 < len(payload["activity_id"]) <= 128
+            and payload.get("status") == "completed"
         ):
-            raise RuntimeValidationError("activity completion payload is invalid")
-        return {"activity_id": activity_id, "status": "completed"}
+            return dict(payload)
+        return _activity_wire_payload(payload, completed=True)
     raise RuntimeValidationError("event type is not allowed for append")
 
 
@@ -339,6 +337,30 @@ def _append_event_once(
                 payload=event_payload,
                 payload_digest=payload_digest,
             )
+            approval_attempt = None
+            if event_type in {
+                "execution.awaiting_action",
+                "execution.approval_resolved",
+            }:
+                approval_attempt = (
+                    Attempt.objects.select_for_update()
+                    .select_related("execution__workspace", "execution__profile")
+                    .get(pk=authorization.attempt_id)
+                )
+            if event_type == "execution.awaiting_action" and set(event_payload) != {
+                "action_kind"
+            }:
+                from .approvals import record_approval_request_from_event
+
+                record_approval_request_from_event(approval_attempt, event_payload)
+            elif event_type == "execution.approval_resolved":
+                from .approvals import apply_approval_resolution
+
+                apply_approval_resolution(
+                    approval_attempt.id,
+                    event_payload["approval_request_id"],
+                    event_payload["outcome"],
+                )
             _enqueue_event_delivery(event)
             return event
     except IntegrityError:

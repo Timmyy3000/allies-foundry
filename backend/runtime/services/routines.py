@@ -190,7 +190,7 @@ def _accept_routine_dispatch_once(
         "run_id": str(command.run_id),
         "title_snapshot": command.title_snapshot,
         "delayed": command.delayed,
-        "occurrence_disposition": "delayed" if command.delayed else "admitted",
+        "occurrence_disposition": command.occurrence_disposition,
         "routine_dispatch_fingerprint": command.fingerprint,
     }
     payload_digest = digest_payload(payload)
@@ -221,7 +221,7 @@ def _accept_routine_dispatch_once(
             run_id=command.run_id,
             scheduled_at=command.scheduled_at,
             delayed=command.delayed,
-            occurrence_disposition="delayed" if command.delayed else "admitted",
+            occurrence_disposition=command.occurrence_disposition,
             main_conversation_id=command.main_conversation_id,
             run_conversation_id=command.run_conversation_id,
             cloud_binding_id=command.cloud_binding_id,
