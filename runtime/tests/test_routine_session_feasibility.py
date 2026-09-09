@@ -92,6 +92,60 @@ def test_owned_network_command_is_unexposed_and_allows_egress():
     assert "-p" not in command
 
 
+def test_launcher_runs_the_materialized_profile_gateway_in_a_managed_volume(
+    tmp_path,
+):
+    image = "allies/hermes@sha256:" + "a" * 64
+    command = LAUNCH.build_run_command(
+        image=image,
+        container_name="container",
+        network_name="network",
+        data_root=tmp_path / "data",
+        data_volume_name="cld012-data",
+        socket_root=tmp_path / "socket",
+        runtime_root=RUNTIME_ROOT,
+        probe_path=RUNTIME_ROOT / "hermes-image" / "smoke_routine_sessions.py",
+        profile_id="profile",
+        credential_ref="vault://cld012/hermes",
+    )
+
+    assert "type=volume,source=cld012-data,destination=/opt/data,volume-nocopy" in command
+    assert "ALLIES_RICH_APPROVALS_ENABLED=false" in command
+    assert "HERMES_REQUEST_TIMEOUT=30" in command
+    assert "HERMES_STREAM_TIMEOUT=30" in command
+    assert command[-7:] == [
+        image,
+        "/opt/hermes/docker/main-wrapper.sh",
+        "--profile",
+        "profile",
+        "gateway",
+        "run",
+        "--no-supervise",
+    ]
+
+    copy = LAUNCH.build_data_volume_copy_command(
+        image=image,
+        data_root=tmp_path / "data",
+        data_volume_name="cld012-data",
+    )
+    assert "type=volume,source=cld012-data,destination=/dest,volume-nocopy" in copy
+    assert "cp -a /src/. /dest/ && chown -R 10000:10000 /dest" in copy[-1]
+    assert "chmod 600" in copy[-1]
+
+
+def test_readiness_command_uses_the_materialized_profile_credential():
+    code = LAUNCH._readiness_command("container")[-1]
+
+    assert "ProfileStore" in code
+    assert "read_api_key(profile_id)" in code
+    assert "_default_credential_resolver" not in code
+
+
+def test_copilot_profile_uses_the_provider_credential_name():
+    assert LAUNCH._model_credential_name("copilot") == "GH_TOKEN"
+    assert LAUNCH._model_credential_name("openai") == "MODEL_PROVIDER_API_KEY"
+
+
 @pytest.mark.parametrize(
     ("inspect_output", "expected"),
     [

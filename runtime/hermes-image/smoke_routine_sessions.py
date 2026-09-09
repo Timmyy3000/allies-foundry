@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-MODEL = "gpt-5.6-luna"
+MODEL = os.environ.get("CLD012_MODEL", "gpt-5.6-luna")
 MAX_TIMEOUT_SECONDS = 60.0
 SERVER_OBSERVABLE_BARRIER_PREREQUISITE = "server_observable_barrier_events_required"
 MAIN_CONVERSATION = "cld012-main-conversation"
@@ -860,9 +860,9 @@ async def _ready_once(client: Any) -> bool:
 
 async def _service_probe(timeout_seconds: float) -> dict[str, Any]:
     try:
-        from allies_runtime.__main__ import _default_credential_resolver
         from allies_runtime.config import load_settings
         from allies_runtime.hermes import HermesClient, stable_session_identifiers
+        from allies_runtime.profile_store import ProfileStore
     except (ImportError, AttributeError) as error:
         return _report("service", "SETUP_BLOCKED", [_check("runtime_import", "blocked", _safe_reason(error))])
 
@@ -873,15 +873,19 @@ async def _service_probe(timeout_seconds: float) -> dict[str, Any]:
     try:
         values = dict(os.environ)
         settings = load_settings(values)
-        resolver = _default_credential_resolver(settings.credential_ref, values)
         profile_store_root = Path(settings.volume_root)
-        from allies_runtime.profile_store import ProfileStore
-
         store = ProfileStore(profile_store_root)
+
+        def resolver(_reference):
+            return store.read_api_key(profile_id)
+
+        def profile_resolver(key):
+            return store.read_api_key(key)
+
         client = HermesClient(
             settings,
             resolver,
-            profile_credential_resolver=lambda key: store.read_api_key(key),
+            profile_credential_resolver=profile_resolver,
         )
     except (OSError, TypeError, ValueError) as error:
         return _report("service", "SETUP_BLOCKED", [_check("service_configuration", "blocked", _safe_reason(error))])

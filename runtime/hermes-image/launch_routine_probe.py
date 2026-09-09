@@ -29,7 +29,7 @@ RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-MODEL = "gpt-5.6-luna"
+MODEL = os.environ.get("CLD012_MODEL", "gpt-5.6-luna")
 SOURCE_COMMIT = "36cb5ae5530a75def7df3195e49b7a4aa2add482"
 MAX_TIMEOUT_SECONDS = 60.0
 IMAGE_DIGEST = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$", re.IGNORECASE)
@@ -315,12 +315,18 @@ def build_run_command(
     container_name: str,
     network_name: str,
     data_root: Path,
+    data_volume_name: str | None = None,
     socket_root: Path,
     runtime_root: Path,
     probe_path: Path,
     profile_id: str,
     credential_ref: str,
 ) -> list[str]:
+    data_mount = (
+        f"type=volume,source={data_volume_name},destination=/opt/data,volume-nocopy"
+        if data_volume_name
+        else f"type=bind,source={data_root},destination=/opt/data"
+    )
     return [
         "docker",
         "run",
@@ -332,7 +338,7 @@ def build_run_command(
         "--entrypoint",
         "/init",
         "--mount",
-        f"type=bind,source={data_root},destination=/opt/data",
+        data_mount,
         "--mount",
         f"type=bind,source={socket_root},destination=/run/allies-runtime,readonly",
         "--mount",
@@ -346,8 +352,22 @@ def build_run_command(
         "--env",
         "HERMES_ORIGIN=http://127.0.0.1:8642",
         "--env",
+        "HERMES_REQUEST_TIMEOUT=30",
+        "--env",
+        "HERMES_STREAM_TIMEOUT=30",
+        "--env",
+        f"CLD012_MODEL={MODEL}",
+        "--env",
+        "ALLIES_RICH_APPROVALS_ENABLED=false",
+        "--env",
         f"CLD012_HERMES_PROFILE_ID={profile_id}",
         image,
+        "/opt/hermes/docker/main-wrapper.sh",
+        "--profile",
+        profile_id,
+        "gateway",
+        "run",
+        "--no-supervise",
     ]
 
 
@@ -362,17 +382,68 @@ def build_network_command(network_name: str) -> list[str]:
     ]
 
 
+def build_data_volume_create_command(volume_name: str) -> list[str]:
+    return [
+        "docker",
+        "volume",
+        "create",
+        "--label",
+        "cld012.owner=probe",
+        volume_name,
+    ]
+
+
+def build_data_volume_copy_command(
+    *, image: str, data_root: Path, data_volume_name: str
+) -> list[str]:
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--user",
+        "0",
+        "--mount",
+        f"type=bind,source={data_root},destination=/src,readonly",
+        "--mount",
+        f"type=volume,source={data_volume_name},destination=/dest,volume-nocopy",
+        "--entrypoint",
+        "/bin/sh",
+        image,
+        "-ec",
+        "cp -a /src/. /dest/ && chown -R 10000:10000 /dest && "
+        "for env in /dest/profiles/*/.env; do "
+        "[ -f \"$env\" ] && chmod 600 \"$env\"; "
+        "done",
+    ]
+
+
 def _readiness_command(container_name: str) -> list[str]:
     code = """import asyncio
 import os
-from allies_runtime.__main__ import _default_credential_resolver, probe_readiness
+from allies_runtime.__main__ import probe_readiness
 from allies_runtime.config import load_settings
 from allies_runtime.hermes import HermesClient
+from allies_runtime.profile_store import ProfileStore
 
 async def main():
-    settings = load_settings(dict(os.environ))
-    resolver = _default_credential_resolver(settings.credential_ref, dict(os.environ))
-    client = HermesClient(settings, resolver)
+    values = dict(os.environ)
+    settings = load_settings(values)
+    profile_id = values.get("CLD012_HERMES_PROFILE_ID", "")
+    if not profile_id:
+        raise RuntimeError("materialized Hermes profile is required")
+    store = ProfileStore(settings.volume_root)
+
+    def resolver(_reference):
+        return store.read_api_key(profile_id)
+
+    def profile_resolver(key):
+        return store.read_api_key(key)
+
+    client = HermesClient(
+        settings,
+        resolver,
+        profile_credential_resolver=profile_resolver,
+    )
     print("READY" if await probe_readiness(client) else "NOT_READY")
 
 asyncio.run(main())
@@ -486,6 +557,7 @@ def _materialize_profile(
     except (ImportError, AttributeError) as error:
         raise LaunchBlocked("profile materialization runtime is unavailable") from error
 
+    credential_name = _model_credential_name(provider)
     profile_id = uuid4()
     seed = ProfileSeed(
         foundry_profile_id=profile_id,
@@ -494,7 +566,7 @@ def _materialize_profile(
         provider=provider,
         model=MODEL,
         first_chat_instruction="Use only the authorized tools for this bounded synthetic probe.",
-        credential_refs={"MODEL_PROVIDER_API_KEY": model_profile_ref},
+        credential_refs={credential_name: model_profile_ref},
         base_url=base_url,
         memory_mode="narrow_tools",
         memory_tool_allowlist=("mnemosyne_recall", "mnemosyne_remember"),
@@ -524,16 +596,28 @@ def _wait_for_readiness(runner: Runner, container_name: str, timeout: float) -> 
     return False
 
 
+def _model_credential_name(provider: str) -> str:
+    return (
+        "GH_TOKEN"
+        if provider.strip().lower() == "copilot"
+        else "MODEL_PROVIDER_API_KEY"
+    )
+
+
 def _cleanup(
     runner: Runner,
     container_name: str | None,
     network_name: str | None,
+    data_volume_name: str | None,
     timeout: float,
 ) -> bool:
     outcomes: list[bool] = []
     for command in (
         ["docker", "rm", "--force", container_name] if container_name else None,
         ["docker", "network", "rm", network_name] if network_name else None,
+        ["docker", "volume", "rm", data_volume_name]
+        if data_volume_name
+        else None,
     ):
         if command is None:
             continue
@@ -569,6 +653,7 @@ def run_probe(
     }
     container_name: str | None = None
     network_name: str | None = None
+    data_volume_name: str | None = None
     proxy: CredentialSocketProxy | None = None
     cleanup_done = False
     try:
@@ -634,6 +719,28 @@ def run_probe(
             if not _succeeded(network):
                 raise LaunchBlocked("owned isolated network could not be created")
             network_name = network_candidate
+            data_volume_candidate = _owned_name("data")
+            volume = _run(
+                runner,
+                build_data_volume_create_command(data_volume_candidate),
+                setup_timeout_seconds,
+            )
+            if not _succeeded(volume):
+                raise LaunchBlocked("owned data volume could not be created")
+            data_volume_name = data_volume_candidate
+            copied = _run(
+                runner,
+                build_data_volume_copy_command(
+                    image=image,
+                    data_root=data_root,
+                    data_volume_name=data_volume_name,
+                ),
+                setup_timeout_seconds,
+            )
+            if not _succeeded(copied):
+                raise LaunchBlocked(
+                    "materialized profile could not be copied into data volume"
+                )
             run_result = _run(
                 runner,
                 build_run_command(
@@ -641,6 +748,7 @@ def run_probe(
                     container_name=container_candidate,
                     network_name=network_name,
                     data_root=data_root,
+                    data_volume_name=data_volume_name,
                     socket_root=socket_root,
                     runtime_root=runtime_root,
                     probe_path=probe_path,
@@ -696,15 +804,37 @@ def run_probe(
                         report["status"] = capability_status
                     else:
                         report.update(status="SETUP_BLOCKED", reason="probe_setup_blocked")
-            report["cleanup"] = "passed" if _cleanup(runner, container_name, network_name, 5.0) else "failed"
+            report["cleanup"] = (
+                "passed"
+                if _cleanup(
+                    runner,
+                    container_name,
+                    network_name,
+                    data_volume_name,
+                    5.0,
+                )
+                else "failed"
+            )
             cleanup_done = True
             if report["cleanup"] == "failed":
                 report["status"] = "CLEANUP_INCOMPLETE"
     except (LaunchBlocked, OSError, subprocess.TimeoutExpired, TypeError, ValueError) as error:
         report.update(status="SETUP_BLOCKED", setup="blocked", reason=_safe_reason(error))
     finally:
-        if not cleanup_done and (container_name or network_name):
-            report["cleanup"] = "passed" if _cleanup(runner, container_name, network_name, 5.0) else "failed"
+        if not cleanup_done and (
+            container_name or network_name or data_volume_name
+        ):
+            report["cleanup"] = (
+                "passed"
+                if _cleanup(
+                    runner,
+                    container_name,
+                    network_name,
+                    data_volume_name,
+                    5.0,
+                )
+                else "failed"
+            )
             if report["cleanup"] == "failed":
                 report["status"] = "CLEANUP_INCOMPLETE"
         if proxy is not None:
