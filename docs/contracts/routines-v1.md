@@ -11,7 +11,7 @@ The identity tuple is kept in `routines-v1.lock.json` and is:
 ```text
 contract_name=routines
 schema_version=v1
-content_revision=7
+content_revision=8
 content_sha256=<SHA-256 of this exact file>
 fixture_sha256=<SHA-256 of fixtures/routines-v1.json>
 ```
@@ -259,7 +259,8 @@ linked execution identity; a delivery retry reuses the occurrence identity.
 ## Results, main-chat insertion, and approval
 
 Foundry emits ordered `routine.result` and `routine.approval_requested` events. A result
-contains immutable correlation, routine revision/title snapshot, `outcome`,
+contains immutable correlation, required `routine_revision` and `title_snapshot` fields
+copied exactly from its accepted dispatch, `outcome`,
 bounded result text, `delayed`, and typed references such as
 `{"label":"document","url":"https://example.test/document"}`. Credentials,
 tool grants, arbitrary hidden notes, full transcripts, and run-inspection URLs
