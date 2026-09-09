@@ -593,6 +593,7 @@ def _materialize_profile(
             ProfileProvisionStatus,
             ProfileSeed,
             ProfileStore,
+            ProfileStoreError,
         )
     except (ImportError, AttributeError) as error:
         raise LaunchBlocked("profile materialization runtime is unavailable") from error
@@ -617,7 +618,10 @@ def _materialize_profile(
         data_root,
         credential_resolver=UnixSocketCredentialResolver(str(socket_path)),
     )
-    receipt = store.materialize(seed)
+    try:
+        receipt = store.materialize(seed)
+    except ProfileStoreError as error:
+        raise LaunchBlocked("synthetic profile materialization failed") from error
     if receipt.status not in {ProfileProvisionStatus.CREATED, ProfileProvisionStatus.EXISTING}:
         raise LaunchBlocked("synthetic profile materialization was not accepted")
     return seed.hermes_profile_key or ""
@@ -835,10 +839,14 @@ def run_probe(
                         _probe_command(container_name, probe_timeout_seconds),
                         _probe_execution_timeout(probe_timeout_seconds),
                     )
-                except subprocess.TimeoutExpired:
+                except (OSError, subprocess.TimeoutExpired) as error:
                     report.update(
                         status="SETUP_BLOCKED",
-                        reason="probe_timeout",
+                        reason=(
+                            "probe_timeout"
+                            if isinstance(error, subprocess.TimeoutExpired)
+                            else _safe_reason(error)
+                        ),
                     )
                 else:
                     payload = None

@@ -475,6 +475,54 @@ def test_run_probe_preserves_setup_after_probe_timeout(monkeypatch, tmp_path):
     assert report["reason"] == "probe_timeout"
 
 
+def test_run_probe_preserves_stages_after_probe_exec_os_error(monkeypatch, tmp_path):
+    calls = []
+    runner = _patch_launcher_setup(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(LAUNCH, "_wait_for_readiness", lambda *args: True)
+
+    def os_error_probe_runner(command, **kwargs):
+        calls.append(command)
+        if command[1:2] == ["exec"]:
+            raise OSError("probe process unavailable")
+        return runner(command, **kwargs)
+
+    report = LAUNCH.run_probe(
+        image="allies/hermes@sha256:" + "7" * 64,
+        credential_ref="vault://cld012/hermes",
+        model_profile_ref="vault://cld012/model",
+        setup_timeout_seconds=1,
+        probe_timeout_seconds=1,
+        runner=os_error_probe_runner,
+    )
+
+    assert report["setup"] == "passed"
+    assert report["readiness"] == "passed"
+    assert report["model_preflight"] == "pending"
+    assert report["status"] == "SETUP_BLOCKED"
+    assert report["reason"] == "os"
+
+
+def test_materialize_profile_sanitizes_profile_store_failure(monkeypatch, tmp_path):
+    from allies_runtime.profile_store import ProfileStoreError
+
+    def fail_materialize(self, seed):
+        raise ProfileStoreError("credential resolution failed")
+
+    monkeypatch.setattr(
+        "allies_runtime.profile_store.ProfileStore.materialize",
+        fail_materialize,
+    )
+
+    with pytest.raises(LAUNCH.LaunchBlocked, match="materialization failed"):
+        LAUNCH._materialize_profile(
+            tmp_path,
+            "/tmp/cld012-hermes-credential.sock",
+            "vault://cld012/model",
+            provider="openai",
+            base_url=None,
+        )
+
+
 def test_run_probe_exec_budget_covers_sequential_service_stages(
     monkeypatch, tmp_path
 ):
@@ -1027,9 +1075,32 @@ def test_offline_checks_bound_blocking_initial_remember(tmp_path):
         assert by_name["shared_profile_distinct_writes"]["status"] == "fail"
         assert by_name["shared_profile_concurrent_writes"]["status"] == "blocked"
         assert by_name["fresh_shared_session_recall"]["status"] == "blocked"
+        assert by_name["fresh_shared_session_contention_recall"]["status"] == "blocked"
     finally:
         for provider in Provider.instances:
             provider.release.set()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ImportError("mnemosyne missing"), RuntimeError("provider invariant")],
+)
+def test_run_offline_sanitizes_provider_exception(monkeypatch, failure):
+    class Provider:
+        def initialize(self, session_id, **kwargs):
+            raise failure
+
+    monkeypatch.setattr(
+        SMOKE.importlib,
+        "import_module",
+        lambda name: type("Module", (), {"AlliesMnemosyneProvider": Provider}),
+    )
+
+    report = SMOKE.run_offline(timeout_seconds=1)
+
+    assert report["status"] == "OFFLINE_DIAGNOSTICS_FAILED"
+    by_name = {check["name"]: check for check in report["checks"]}
+    assert by_name["provider_storage"]["status"] == "fail"
 
 
 def test_offline_checks_bound_blocking_fresh_recall(tmp_path):

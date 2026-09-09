@@ -649,8 +649,16 @@ def _offline_memory_checks(
         else:
             checks.extend(
                 (
-                    _check("fresh_shared_session_recall", "fail"),
-                    _check("fresh_shared_session_contention_recall", "fail"),
+                    _check(
+                        "fresh_shared_session_recall",
+                        "blocked",
+                        "skipped after bounded contention-write timeout",
+                    ),
+                    _check(
+                        "fresh_shared_session_contention_recall",
+                        "blocked",
+                        "skipped after bounded contention-write timeout",
+                    ),
                 )
             )
         try:
@@ -806,7 +814,7 @@ def run_offline(timeout_seconds: float = MAX_TIMEOUT_SECONDS) -> dict[str, Any]:
                     checks,
                     deadline=deadline,
                 )
-    except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+    except (ImportError, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError) as error:
         checks.append(_check("provider_storage", "fail", _safe_reason(error)))
     finally:
         cleanup_results = [_shutdown_provider(provider) for provider in providers]
