@@ -930,7 +930,7 @@ async def _service_probe(timeout_seconds: float) -> dict[str, Any]:
     if failed:
         checks.append(_check("real_session_turns", "fail", _safe_reason(failed[0])))
         checks.extend(_server_observable_concurrency_checks(results, {}))
-        return _report("service", "SETUP_BLOCKED", checks)
+        return _report("service", "CAPABILITY_FAILED", checks)
     checks.append(_check("real_session_turns", "pass"))
     checks.extend(_server_observable_concurrency_checks(results, {}))
 
