@@ -282,8 +282,9 @@ class CredentialSocketProxy:
                             ):
                                 request.clear()
                             break
-                    if request and request in self._allowed_requests:
-                        response = self._resolve(bytes(request))
+                    request_bytes = bytes(request)
+                    if request_bytes and request_bytes in self._allowed_requests:
+                        response = self._resolve(request_bytes)
                         if response:
                             client.sendall(response)
                 except (OSError, TimeoutError):
