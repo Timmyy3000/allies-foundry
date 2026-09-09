@@ -70,6 +70,7 @@ def update_session_binding(
             Attempt.objects.select_for_update()
             .select_related("execution")
             .filter(pk=attempt_uuid, execution__workspace_id=workspace.id)
+            .exclude(execution__source_kind="routine_dispatch")
             .first()
         )
         if attempt is None:
@@ -320,11 +321,17 @@ def bind_routine_session(
         workspace = Workspace.objects.select_for_update().get(pk=context.workspace_id)
         if workspace.machine_generation != context.machine_generation:
             raise RuntimeFencedError("runtime generation is stale")
+        routine = RoutineExecution.objects.select_for_update().filter(
+            workspace_id=workspace.id, current_attempt_id=attempt_uuid
+        ).first()
+        if routine is None:
+            raise RuntimeLeaseConflictError("routine session target is unavailable")
         attempt = (
             Attempt.objects.select_for_update()
             .select_related("execution")
             .filter(
                 pk=attempt_uuid,
+                execution_id=routine.execution_id,
                 execution__workspace_id=workspace.id,
                 execution__source_kind="routine_dispatch",
             )
@@ -332,11 +339,6 @@ def bind_routine_session(
         )
         if attempt is None:
             raise RuntimeLeaseConflictError("routine attempt is unavailable")
-        routine = RoutineExecution.objects.select_for_update().filter(
-            execution_id=attempt.execution_id, current_attempt_id=attempt.id
-        ).first()
-        if routine is None:
-            raise RuntimeLeaseConflictError("routine session target is unavailable")
         lease = Lease.objects.select_for_update().filter(attempt_id=attempt.id).first()
         if lease is None or lease.token_digest != token_digest:
             raise RuntimeLeaseConflictError("lease token does not authorize routine")

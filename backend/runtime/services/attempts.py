@@ -169,6 +169,7 @@ def _finish_attempt(
             Attempt.objects.select_for_update()
             .select_related("execution")
             .filter(pk=attempt_uuid, execution__workspace_id=workspace.id)
+            .exclude(execution__source_kind="routine_dispatch")
             .first()
         )
         if attempt is None:

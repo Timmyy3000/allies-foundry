@@ -21,6 +21,7 @@ from runtime.exceptions import (
     RuntimeNotReadyError,
 )
 from runtime.models import (
+    Attempt,
     AttemptStatus,
     ConversationBinding,
     EventDeliveryState,
@@ -358,8 +359,9 @@ def test_routine_result_locking_supports_postgres_normal_and_failed_replays(
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("operation", ["result", "session-bind"])
 def test_postgres_result_and_expiry_race_has_one_terminal_outcome(
-    routine_context, monkeypatch, transactional_db
+    routine_context, monkeypatch, transactional_db, operation
 ):
     if connection.vendor != "postgresql":
         pytest.skip("requires PostgreSQL row-lock semantics")
@@ -397,7 +399,7 @@ def test_postgres_result_and_expiry_race_has_one_terminal_outcome(
         close_old_connections()
         role.name = role_name
         with connection.cursor() as cursor:
-            cursor.execute("SET lock_timeout = '2s'")
+            cursor.execute("SET lock_timeout = '10s'")
             cursor.execute("SELECT pg_backend_pid()")
             worker_pids[role_name] = cursor.fetchone()[0]
 
@@ -406,16 +408,22 @@ def test_postgres_result_and_expiry_race_has_one_terminal_outcome(
         while monotonic() < deadline:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT %s = ANY(pg_blocking_pids(%s))",
-                    [controller_pid, worker_pid],
+                    "SELECT pg_blocking_pids(%s)", [worker_pid],
                 )
-                if cursor.fetchone()[0]:
+                blockers = cursor.fetchone()[0]
+                if controller_pid in blockers or worker_pids.get("expiry") in blockers:
                     return
-        raise AssertionError("expiry worker did not queue on the held routine lock")
+        raise AssertionError("worker did not queue on the held routine lock")
 
     def append_result():
         try:
             set_lock_timeout("result")
+            if operation == "session-bind":
+                bind_routine_session(
+                    state["context"], claim.attempt_id, claim.lease_token,
+                    None, "late-routine-session",
+                )
+                return "bound"
             append_runtime_routine_result(
                 state["context"],
                 claim.attempt_id,
@@ -456,6 +464,8 @@ def test_postgres_result_and_expiry_race_has_one_terminal_outcome(
         wait_for_controller_block(controller_pid, worker_pids["expiry"])
         result_future = executor.submit(append_result)
         assert result_routine_query.wait(timeout=5)
+        wait_for_controller_block(controller_pid, worker_pids["result"])
+        Attempt.objects.select_for_update(nowait=True).get(pk=claim.attempt_id)
         controller.__exit__(None, None, None)
         controller = None
         result_outcome = result_future.result(timeout=10)
@@ -820,6 +830,97 @@ def test_routine_session_binding_endpoint_accepts_runtime_payload_without_cloud_
 
     assert response.status_code == 200, response.content
     assert response.json() == {"session_id": "routine-api"}
+
+
+@pytest.mark.parametrize("main_session", [None, "existing-main-session"])
+def test_routine_lease_cannot_bind_the_main_session(routine_context, main_session):
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    binding = ConversationBinding.objects.get(profile=state["profile"])
+    binding.hermes_session_id = main_session
+    binding.save(update_fields=["hermes_session_id"])
+    issued = issue_runtime_credential(state["workspace"].id, "routine-api-secret")
+
+    response = Client().put(
+        f"/api/v1/runtime/attempts/{claim.attempt_id}/session-binding",
+        data=json.dumps(
+            {
+                "cloud_conversation_ref": str(state["main_conversation_id"]),
+                "expected_session_id": main_session,
+                "effective_session_id": "routine-must-not-be-main",
+            }
+        ),
+        content_type="application/json",
+        headers={
+            "Authorization": f"Bearer {issued.raw_token}",
+            "X-Foundry-Lease-Token": claim.lease_token,
+        },
+    )
+
+    assert response.status_code == 409, response.content
+    binding.refresh_from_db()
+    routine.refresh_from_db()
+    assert binding.hermes_session_id == main_session
+    assert routine.hermes_session_id is None
+    assert routine.current_attempt.session_receipt is None
+    assert Lease.objects.get(attempt_id=claim.attempt_id).state == LeaseState.ACTIVE
+
+
+def test_routine_lease_cannot_complete_through_main_endpoint(routine_context):
+    state = routine_context
+    _command, routine = dispatch(state)
+    claim = claim_next_execution(state["context"], uuid4(), 2)
+    lease = Lease.objects.get(attempt_id=claim.attempt_id)
+    attempt = routine.current_attempt
+    # Exercise the guard even if an older main-binding endpoint stored a receipt.
+    attempt.session_receipt = {"session_id": "legacy-routine-session"}
+    attempt.session_lease_digest = lease.token_digest
+    attempt.save(update_fields=["session_receipt", "session_lease_digest"])
+    issued = issue_runtime_credential(state["workspace"].id, "routine-api-secret")
+    response = Client().post(
+        f"/api/v1/runtime/attempts/{claim.attempt_id}/complete",
+        data=json.dumps(
+            {
+                "receipt": {"code": "completed"},
+                "event_id": str(uuid4()),
+                "stream_id": "routine-stream",
+                "sequence": 1,
+                "payload": {"run_id": "routine-run", "status": "completed"},
+            }
+        ),
+        content_type="application/json",
+        headers={
+            "Authorization": f"Bearer {issued.raw_token}",
+            "X-Foundry-Lease-Token": claim.lease_token,
+        },
+    )
+    assert response.status_code == 409, response.content
+    routine.refresh_from_db()
+    attempt.refresh_from_db()
+    lease.refresh_from_db()
+    assert routine.status == RoutineRunStatus.WORKING
+    assert attempt.terminal_receipt is None
+    assert lease.state == LeaseState.ACTIVE
+    assert not ExecutionEvent.objects.filter(attempt_id=attempt.id).exists()
+    result = append_runtime_routine_result(
+        state["context"],
+        claim.attempt_id,
+        claim.lease_token,
+        event_id=uuid4(),
+        sequence=1,
+        outcome="unchanged",
+        text="Completed through the routine result endpoint.",
+        references=[],
+        delayed=False,
+    )
+    assert result["status"] == "succeeded"
+    assert (
+        ExecutionEvent.objects.filter(
+            attempt_id=attempt.id, event_type="routine.result"
+        ).count()
+        == 1
+    )
 
 
 def test_same_profile_routines_have_distinct_leases_and_sessions(routine_context):

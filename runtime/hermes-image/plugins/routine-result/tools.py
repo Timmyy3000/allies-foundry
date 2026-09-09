@@ -31,7 +31,11 @@ ROUTINE_RESULT_SCHEMA = {
                 "text": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": _MAX_TEXT_BYTES,
+                    "maxLength": _MAX_TEXT_BYTES // 4,
+                    "description": (
+                        "Concise result, without NUL characters. The 16384 UTF-8 byte "
+                        "budget allows at most 4096 characters for any Unicode text."
+                    ),
                 },
                 "references": {
                     "type": "array",
@@ -43,12 +47,20 @@ ROUTINE_RESULT_SCHEMA = {
                             "label": {
                                 "type": "string",
                                 "minLength": 1,
-                                "maxLength": _MAX_LABEL_BYTES,
+                                "maxLength": _MAX_LABEL_BYTES // 4,
+                                "description": (
+                                    "Source label without NUL characters; at most 255 "
+                                    "UTF-8 bytes (63 characters for any Unicode text)."
+                                ),
                             },
                             "url": {
                                 "type": "string",
                                 "minLength": 1,
-                                "maxLength": _MAX_URL_BYTES,
+                                "maxLength": _MAX_URL_BYTES // 4,
+                                "description": (
+                                    "HTTP(S) URL without NUL characters; at most 2048 "
+                                    "UTF-8 bytes (512 characters for any Unicode text)."
+                                ),
                                 "pattern": "^https?://",
                             },
                         },
