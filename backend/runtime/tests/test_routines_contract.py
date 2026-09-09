@@ -69,10 +69,10 @@ def test_routines_v1_artifacts_match_cloud_owned_lock():
     assert lock == {
         "contract_name": "routines",
         "schema_version": "v1",
-        "content_revision": 12,
+        "content_revision": 13,
         "normative_owner": "cloud",
-        "content_sha256": "919c1ed5a87643a80c94fea19411f6760f75b972d60b202fbbf86844908f05f1",
-        "fixture_sha256": "d740c46642d14bf7a13b56f734ef5deaa4af791e082c1901b57e52cd95160c09",
+        "content_sha256": "63215a54e80dd638167b6b579b55d41c77230525c5b9a0f944a58bef377cbb4e",
+        "fixture_sha256": "8a2ce0b008fd8e681fe08c1b494a5ebf1b2477991611b18360e1a2460f7472ef",
         "hash_algorithm": "sha256",
         "hash_encoding": "utf-8-no-bom-lf-final-newline",
         "future_enforcement_owners": ["CLD-013", "FND-012", "integration"],
@@ -158,10 +158,36 @@ def test_routines_v1_fixture_covers_shapes_and_future_owner_metadata():
         assert case["enforcing_owner"] in allowed_owners
         assert case["actions"]
     assert {error["enforcing_owner"] for error in fixture["errors"]} <= allowed_owners
+    error_codes = {error["code"] for error in fixture["errors"]}
+    manual_reconciliation = next(
+        case for case in cases if case["case_id"] == "lifecycle-terminal"
+    )
+    assert manual_reconciliation["input"] == "approval.crash_vectors"
+    assert manual_reconciliation["preconditions"] == [
+        "action attempt is unknown after ambiguous external outcome"
+    ]
+    assert manual_reconciliation["actions"] == [
+        "transition unknown to manual_reconciliation",
+        "stop automatic processing",
+    ]
+    assert (
+        manual_reconciliation["expected_result_code"]
+        == "ACTION_MANUAL_RECONCILIATION"
+    )
+    assert manual_reconciliation["expected_result_code"] in error_codes
+    assert manual_reconciliation["expected_postcondition"] == (
+        "action attempt reaches manual_reconciliation; automatic processing stops "
+        "and any later human reconciliation never reopens the terminal run"
+    )
+    action_attempt_states = fixture["approval"]["action_attempt_states"]
+    assert action_attempt_states.index("manual_reconciliation") == (
+        action_attempt_states.index("unknown") + 1
+    )
     assert {
         "STALE_DUE_CANDIDATE",
         "APPROVAL_EXPIRED",
         "ACTION_OUTCOME_UNKNOWN",
+        "ACTION_MANUAL_RECONCILIATION",
         "RESULT_INSERTED_ONCE",
     } <= {error["code"] for error in fixture["errors"]}
     assert fixture["management_success_codes"] == [

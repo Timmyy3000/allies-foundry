@@ -2,7 +2,7 @@
   "contract": {
     "contract_name": "routines",
     "schema_version": "v1",
-    "content_revision": 12,
+    "content_revision": 13,
     "normative_owner": "cloud",
     "compatibility_vendor": "foundry",
     "document_path": "docs/contracts/routines-v1.md",
@@ -961,6 +961,7 @@
     {"code": "STALE_GENERATION", "enforcing_owner": "FND-012", "terminal": true, "retry": "fenced"},
     {"code": "IDEMPOTENCY_CONFLICT", "enforcing_owner": "FND-012", "terminal": false, "retry": "do_not_replay"},
     {"code": "ACTION_OUTCOME_UNKNOWN", "enforcing_owner": "FND-012", "terminal": true, "retry": "read_only_reconcile"},
+    {"code": "ACTION_MANUAL_RECONCILIATION", "enforcing_owner": "FND-012", "terminal": true, "retry": "human_reconciliation"},
     {"code": "REPLACEMENT_PENDING", "enforcing_owner": "integration", "terminal": false, "retry": "wait_for_fencing_receipt"},
     {"code": "RESULT_INSERTED_ONCE", "enforcing_owner": "integration", "terminal": true, "retry": "dedupe_watermark"}
   ],
@@ -1002,7 +1003,7 @@
     {"case_id": "approval-reject", "requirement": "rejection prevents action", "input": "approval.decision", "preconditions": ["pending"], "actions": ["reject"], "expected_result_code": "APPROVAL_REJECTED", "expected_postcondition": "terminal cancellation and main outcome", "enforcing_owner": "FND-012"},
     {"case_id": "approval-expire", "requirement": "database-clock expiry", "input": "approval.requested", "preconditions": ["now at or after expires_at"], "actions": ["expire"], "expected_result_code": "APPROVAL_EXPIRED", "expected_postcondition": "no later approval can authorize", "enforcing_owner": "FND-012"},
     {"case_id": "approval-action-unknown", "requirement": "no unsafe replay", "input": "approval.crash_vectors", "preconditions": ["response lost"], "actions": ["mark unknown", "read-only reconcile"], "expected_result_code": "ACTION_OUTCOME_UNKNOWN", "expected_postcondition": "manual reconciliation if unresolved", "enforcing_owner": "FND-012"},
-    {"case_id": "lifecycle-terminal", "requirement": "terminal monotonicity", "input": "lifecycle.transitions", "preconditions": ["run working", "completion outcome is ambiguous after external action attempt"], "actions": ["mark outcome unknown", "stop automatic processing for manual reconciliation"], "expected_result_code": "ACTION_MANUAL_RECONCILIATION", "expected_postcondition": "terminal state never reopens", "enforcing_owner": "FND-012"},
+    {"case_id": "lifecycle-terminal", "requirement": "manual reconciliation preserves terminal monotonicity", "input": "approval.crash_vectors", "preconditions": ["action attempt is unknown after ambiguous external outcome"], "actions": ["transition unknown to manual_reconciliation", "stop automatic processing"], "expected_result_code": "ACTION_MANUAL_RECONCILIATION", "expected_postcondition": "action attempt reaches manual_reconciliation; automatic processing stops and any later human reconciliation never reopens the terminal run", "enforcing_owner": "FND-012"},
     {"case_id": "correlation-fence", "requirement": "immutable identity tuple", "input": "correlation.required_dispatch", "preconditions": ["all IDs present"], "actions": ["compare"], "expected_result_code": "CORRELATION_MISMATCH", "expected_postcondition": "changed identity makes zero state change", "enforcing_owner": "FND-012"},
     {"case_id": "idempotency-conflict", "requirement": "changed replay conflicts", "input": "idempotency.same_key_changed_fingerprint", "preconditions": ["stored receipt"], "actions": ["replay changed body"], "expected_result_code": "IDEMPOTENCY_CONFLICT", "expected_postcondition": "no duplicate side effect", "enforcing_owner": "FND-012"},
     {"case_id": "revision-stale", "requirement": "stale management mutation", "input": "revision.management", "preconditions": ["expected revision old; current revision newer"], "actions": ["CAS mutation"], "expected_result_code": "REVISION_CONFLICT", "expected_postcondition": "zero-write rejection with no saved management receipt", "enforcing_owner": "CLD-013"},
