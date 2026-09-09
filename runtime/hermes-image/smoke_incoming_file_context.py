@@ -21,6 +21,9 @@ def main() -> None:
     assert "attachments/command/notes.txt" in _allies_incoming_file_context_prompt(
         context
     )
+    assert _allies_incoming_file_context_prompt(
+        {**context, "files": [{**descriptor, "name": "界" * 255}]}
+    )
     for invalid in (
         {**context, "files": []},
         {**context, "files": [{**descriptor, "path": "../other/notes.txt"}]},

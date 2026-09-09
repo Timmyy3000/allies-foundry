@@ -39,7 +39,7 @@ diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
 +            not isinstance(file_id, str)
 +            or not re.fullmatch(r"[0-9a-f-]{36}", file_id)
 +            or not isinstance(name, str)
-+            or not 1 <= len(name.encode("utf-8")) <= 255
++            or not 1 <= len(name) <= 255
 +            or any(ord(char) < 32 or ord(char) == 127 for char in name)
 +            or "/" in name
 +            or "\\" in name
