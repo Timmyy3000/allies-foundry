@@ -33,7 +33,8 @@ than inferring a model failure.
 Profile-store failures and offline provider `ImportError`/`RuntimeError`
 failures are converted into sanitized evidence reports. Probe-exec `OSError`
 also preserves passed setup/readiness attribution, and contention timeouts mark
-unexecuted recall checks `blocked` rather than `fail`.
+unexecuted fresh-session and second-profile recall checks `blocked` rather than
+`fail`.
 The launcher also budgets the outer Docker exec for four bounded stream stages
 and twelve bounded request calls; the focused regression independently asserts
 that aggregate formula.
@@ -42,7 +43,7 @@ that aggregate formula.
 
 - Cloud artifact head: `3af3da24e8f8e516861f34ddaa85442bbe25eaa1`
 - Foundry artifact head: `2626076973cfa52eec00eed265ab045b8b7b9ac5`
-- Foundry final evidence head: `0425982c78d081fe13a2fe23d62a2e49bbd84af4`
+- Foundry final evidence head: `cae833ddace34ba92bd2670de1e8bf8edebd76d3`
 - Contract revision: `14`
 - Contract SHA-256: `f05ab0a1baf63551f426c288f0144484c813b5cda535bf1cf5d614fb7a22ea84`
 - Fixture SHA-256: `2660d30ee73e8f3cebf94340ea1169019e3c937fd01a30bff6d0e16ecd54ab35`
@@ -63,8 +64,8 @@ that aggregate formula.
   errors that merely contain "not found". They also cover probe-timeout and
   early-stage attribution, incomplete/malformed early reports, profile-store
   and provider exception sanitization, probe-exec OS-error attribution,
-  contention-timeout blocked states, and the independently asserted aggregate
-  probe-exec budget.
+  contention-timeout blocked states for all unexecuted recalls, and the
+  independently asserted aggregate probe-exec budget.
 - Foundry harness syntax compilation and scoped checks passed.
 - Class A remains `INCONCLUSIVE_REVIEW_REQUIRED`; Class B remains
   `SETUP_BLOCKED`.
