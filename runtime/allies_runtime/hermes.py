@@ -81,6 +81,15 @@ ACTIVITY_KINDS = frozenset(
         "skill_manage",
         "todo",
         "cronjob",
+        "routine_create",
+        "routine_list",
+        "routine_inspect",
+        "routine_update",
+        "routine_pause",
+        "routine_resume",
+        "routine_request_delete",
+        "routine_delete",
+        "routine_result",
         "delegate_task",
         "unknown",
     }
@@ -210,9 +219,9 @@ def _stream_request_body(
         if not re.fullmatch(r"[0-9a-f]{64}", publication_context):
             raise ValueError("Hermes publication context was invalid")
         request_body["allies_file_publication_context"] = publication_context
-    return json.dumps(
-        request_body, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
+    return json.dumps(request_body, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
 
 
 def _validated_tool_name(value: Any) -> str:
@@ -601,14 +610,27 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
             if not isinstance(tool_call, Mapping):
                 continue
             function = tool_call.get("function")
-            if not isinstance(function, Mapping) or function.get("name") != _ROUTINE_RESULT_TOOL:
+            if not isinstance(function, Mapping) or function.get("name") not in {
+                _ROUTINE_RESULT_TOOL,
+                "tool_call",
+            }:
                 continue
+            arguments = function.get("arguments")
+            if function.get("name") == "tool_call":
+                try:
+                    decoded = json.loads(arguments)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if (
+                    not isinstance(decoded, Mapping)
+                    or decoded.get("name") != _ROUTINE_RESULT_TOOL
+                ):
+                    continue
             call_id = tool_call.get("id")
             if not isinstance(call_id, str) or not _TOOL_CALL_ID.fullmatch(call_id):
                 raise HermesMalformedResponse(
                     "Hermes routine result tool call identity was invalid"
                 )
-            arguments = function.get("arguments")
             if not isinstance(arguments, str) or not arguments:
                 raise HermesMalformedResponse(
                     "Hermes routine result tool arguments were invalid"
@@ -617,12 +639,34 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
                 raise HermesMalformedResponse(
                     "Hermes routine result tool arguments were too large"
                 )
-            try:
-                decoded = json.loads(arguments)
-            except json.JSONDecodeError as exc:
-                raise HermesMalformedResponse(
-                    "Hermes routine result tool arguments were not JSON"
-                ) from exc
+            if function.get("name") == _ROUTINE_RESULT_TOOL:
+                try:
+                    decoded = json.loads(arguments)
+                except json.JSONDecodeError as exc:
+                    raise HermesMalformedResponse(
+                        "Hermes routine result tool arguments were not JSON"
+                    ) from exc
+            if function.get("name") == "tool_call":
+                # A rejected wrapper never invoked the result tool and may be retried.
+                responses = [
+                    item
+                    for item in messages
+                    if isinstance(item, Mapping)
+                    and item.get("role") == "tool"
+                    and item.get("tool_call_id") == call_id
+                ]
+                if len(responses) == 1 and responses[0].get("tool_name") == "tool_call":
+                    try:
+                        rejected = json.loads(responses[0].get("content", ""))
+                    except (TypeError, json.JSONDecodeError):
+                        rejected = None
+                    if (
+                        isinstance(rejected, Mapping)
+                        and "error" in rejected
+                        and "status" not in rejected
+                    ):
+                        continue
+                decoded = decoded.get("arguments")
             calls.append((message_index, call_index, call_id, decoded))
 
     if not calls:
@@ -646,12 +690,12 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
         if not isinstance(tool_call_id, str) or not _TOOL_CALL_ID.fullmatch(
             tool_call_id
         ):
+            if message.get("tool_name") != _ROUTINE_RESULT_TOOL:
+                continue
             raise HermesMalformedResponse(
                 "Hermes routine result tool response identity was invalid"
             )
-        if (
-            tool_call_id == call_id
-        ):
+        if tool_call_id == call_id:
             content = message.get("content")
             if not isinstance(content, str) or not content:
                 raise HermesMalformedResponse(
@@ -685,7 +729,9 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
         )
     result = matching_results[0]
     if not isinstance(result, Mapping) or result.get("status") != "accepted":
-        raise HermesMalformedResponse("Hermes routine result tool response was rejected")
+        raise HermesMalformedResponse(
+            "Hermes routine result tool response was rejected"
+        )
     return _routine_result_value(arguments)
 
 
@@ -1308,12 +1354,22 @@ def _session_stream_headers(
     session_key: str | None,
     *,
     routine_result: bool = False,
+    routine_tool_token: str | None = None,
 ) -> Mapping[str, str]:
     headers = dict(_session_key_header(session_key))
     if getattr(settings, "rich_approvals_enabled", True):
         headers["X-Allies-Rich-Approvals"] = "1"
     if routine_result:
         headers["X-Allies-Routine-Result"] = "1"
+    elif routine_tool_token:
+        if (
+            not isinstance(routine_tool_token, str)
+            or len(routine_tool_token) > 2048
+            or any(c.isspace() for c in routine_tool_token)
+        ):
+            raise HermesMalformedResponse("Invalid routine tool capability")
+        headers["X-Allies-Routine-Tool"] = routine_tool_token
+        headers["X-Allies-Foundry-Origin"] = settings.foundry_origin
     return headers
 
 
@@ -1746,6 +1802,7 @@ class HermesClient:
         reasoning_effort: str | None = None,
         routine_result: bool = False,
         file_context: Mapping[str, Any] | None = None,
+        routine_tool_token: str | None = None,
     ) -> HermesStreamResult:
         """Run one profile-scoped SSE turn with bounded response handling."""
 
@@ -1774,6 +1831,7 @@ class HermesClient:
                         self.settings,
                         session_key,
                         routine_result=routine_result,
+                        routine_tool_token=routine_tool_token,
                     ),
                 )
 
@@ -1994,6 +2052,7 @@ class HermesClient:
         reasoning_effort: str | None = None,
         routine_result: bool = False,
         file_context: Mapping[str, Any] | None = None,
+        routine_tool_token: str | None = None,
     ) -> HermesStreamResult:
         reasoning_effort = validate_reasoning_effort(reasoning_effort)
         started_at = time.monotonic()
@@ -2016,6 +2075,7 @@ class HermesClient:
                 reasoning_effort=reasoning_effort,
                 routine_result=routine_result,
                 file_context=file_context,
+                routine_tool_token=routine_tool_token,
             )
         except BaseException as error:
             emit_runtime_event(
@@ -2055,6 +2115,7 @@ class HermesClient:
         routine_result: bool = False,
         file_context: Mapping[str, Any] | None = None,
         publication_context: str | None = None,
+        routine_tool_token: str | None = None,
     ) -> _ObservedHermesStream:
         """Open an SSE response and yield events without buffering the body."""
 
@@ -2111,6 +2172,7 @@ class HermesClient:
                         self.settings,
                         session_key,
                         routine_result=routine_result,
+                        routine_tool_token=routine_tool_token,
                     ),
                 ),
                 self.settings.stream_timeout,

@@ -281,6 +281,7 @@ class FoundryClaim:
     routine_id: str | None = None
     reasoning_effort: str | None = None
     command_id: str | None = None
+    routine_tool_token: str | None = None
 
     def __repr__(self) -> str:  # pragma: no cover - defensive redaction
         return (
@@ -853,6 +854,7 @@ class FoundryClient:
             ),
             reasoning_effort=reasoning_effort,
             command_id=command_id,
+            routine_tool_token=payload.get("routine_tool_token"),
         )
 
     async def incoming_file_chunks(
@@ -1637,12 +1639,15 @@ async def _stream_events(
     routine_result: bool = False,
     file_context: Mapping[str, Any] | None = None,
     publication_context: str | None = None,
+    routine_tool_token: str | None = None,
 ) -> Any:
     stream_kwargs: dict[str, Any] = {"session_key": session_key}
     if reasoning_effort is not None:
         stream_kwargs["reasoning_effort"] = reasoning_effort
     if routine_result:
         stream_kwargs["routine_result"] = True
+    elif routine_tool_token:
+        stream_kwargs["routine_tool_token"] = routine_tool_token
     if file_context is not None:
         stream_kwargs["file_context"] = file_context
     if publication_context is not None:
@@ -2225,6 +2230,7 @@ class FoundryWorker:
                 routine_result=claim.routine_id is not None,
                 file_context=file_context,
                 publication_context=publication_context,
+                routine_tool_token=claim.routine_tool_token,
             )
             stream_ref[0] = stream
             if renewal is None:
