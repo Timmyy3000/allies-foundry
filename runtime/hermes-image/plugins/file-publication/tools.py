@@ -114,7 +114,7 @@ def _ready(value: dict[str, Any], context: str) -> str | None:
             return None
         if (
             not isinstance(name, str)
-            or not 1 <= len(name_bytes) <= 255
+            or not 1 <= len(name) <= 255
             or "/" in name
             or "\\" in name
             or "\x00" in name

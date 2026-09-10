@@ -24,6 +24,7 @@ from gateway.platforms.api_server import (
 )
 from hermes_cli.plugins import discover_plugins
 from model_tools import get_tool_definitions, handle_function_call
+from run_agent import AIAgent
 from tools.thread_context import propagate_context_to_thread
 from toolsets import TOOLSETS, create_custom_toolset
 
@@ -125,6 +126,66 @@ def _test_executor_binding() -> None:
     )
     assert result["final_response"] == "safe"
     assert get_current_allies_file_publication_context() is None
+
+
+def _agent_tools(**capability: object) -> set[str]:
+    agent = AIAgent(
+        model="smoke/model",
+        api_key="smoke-key",
+        base_url="http://127.0.0.1:9/v1",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        **capability,
+    )
+    return agent.valid_tool_names
+
+
+def _test_private_capability_boundary() -> None:
+    assert not {
+        "publish_files",
+        "allies_routine_result",
+    } & _agent_tools()
+    assert not {
+        "publish_files",
+        "allies_routine_result",
+    } & _agent_tools(enabled_toolsets=["all"])
+
+    composite = "_allies_private_tools_smoke_composite"
+    create_custom_toolset(
+        composite,
+        "Build-time composite containing both private tools.",
+        includes=[
+            _ALLIES_FILE_PUBLICATION_TOOLSET,
+            _ALLIES_ROUTINE_RESULT_TOOLSET,
+        ],
+    )
+    try:
+        assert not {
+            "publish_files",
+            "allies_routine_result",
+        } & _agent_tools(enabled_toolsets=[composite])
+    finally:
+        TOOLSETS.pop(composite, None)
+
+    assert "publish_files" in _agent_tools(
+        enabled_toolsets=["all"], allies_file_publication=True
+    )
+    assert "allies_routine_result" not in _agent_tools(
+        enabled_toolsets=["all"], allies_file_publication=True
+    )
+    assert "allies_routine_result" in _agent_tools(
+        enabled_toolsets=["all"], allies_routine_result=True
+    )
+    assert "publish_files" not in _agent_tools(
+        enabled_toolsets=["all"], allies_routine_result=True
+    )
+    try:
+        _agent_tools(allies_file_publication=True, allies_routine_result=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("both private capabilities were accepted")
 
 
 def main() -> None:
@@ -234,6 +295,26 @@ def main() -> None:
         assert NONCE_A not in result and NONCE_B not in result
         assert '"paths"' not in result
 
+    unicode_name = "名" * 255
+    requests = []
+    server, errors = _serve([_published_file(unicode_name)], requests)
+    token = set_current_allies_file_publication_context(NONCE_A)
+    try:
+        unicode_ready = json.loads(
+            handle_function_call(
+                "publish_files",
+                {"paths": ["out.csv"]}, tool_call_id="call-unicode"
+            )
+        )
+    finally:
+        reset_current_allies_file_publication_context(token)
+    server.join(timeout=5)
+    assert not server.is_alive() and not errors
+    assert unicode_ready == {
+        "state": "ready",
+        "files": [{"name": unicode_name, "open_path": "/files/id"}],
+    }
+
     requests = []
     server, errors = _serve([b"x" * (64 * 1024 + 1) + b"\n"], requests)
     token = set_current_allies_file_publication_context(NONCE_A)
@@ -281,6 +362,7 @@ def main() -> None:
     assert NONCE_A not in json.dumps(echoed_context)
 
     _test_executor_binding()
+    _test_private_capability_boundary()
     print("file publication tool: PASS")
 
 

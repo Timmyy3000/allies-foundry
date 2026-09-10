@@ -1,6 +1,63 @@
-warning: in the working copy of 'gateway/platforms/api_server.py', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'model_tools.py', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'allies_file_publication_context.py', LF will be replaced by CRLF the next time Git touches it
+diff --git a/agent/agent_init.py b/agent/agent_init.py
+index 649d533..c717241 100644
+--- a/agent/agent_init.py
++++ b/agent/agent_init.py
+@@ -470,6 +470,8 @@ def init_agent(
+     max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
+     enabled_toolsets: List[str] = None,
+     disabled_toolsets: List[str] = None,
++    allies_routine_result: bool = False,
++    allies_file_publication: bool = False,
+     save_trajectories: bool = False,
+     verbose_logging: bool = False,
+     quiet_mode: bool = False,
+@@ -827,9 +829,25 @@ def init_agent(
+     agent.provider_data_collection = provider_data_collection
+     agent.openrouter_min_coding_score = openrouter_min_coding_score
+ 
++    if not isinstance(allies_routine_result, bool) or not isinstance(
++        allies_file_publication, bool
++    ):
++        raise ValueError("Allies private tool capability is invalid")
++    if allies_routine_result and allies_file_publication:
++        raise ValueError("Allies private tool capabilities are mutually exclusive")
++
++    private_toolsets = []
++    if not allies_routine_result:
++        private_toolsets.append("allies-routine-result")
++    if not allies_file_publication:
++        private_toolsets.append("allies-file-publication")
++    effective_disabled_toolsets = list(
++        dict.fromkeys([*(disabled_toolsets or []), *private_toolsets])
++    )
++
+     # Store toolset filtering options
+     agent.enabled_toolsets = enabled_toolsets
+-    agent.disabled_toolsets = disabled_toolsets
++    agent.disabled_toolsets = effective_disabled_toolsets
+     
+     # Model response configuration
+     agent.max_tokens = max_tokens  # None = use model default
+@@ -1429,7 +1447,7 @@ def init_agent(
+         agent._tool_snapshot_generation = 0
+     agent.tools = _ra().get_tool_definitions(
+         enabled_toolsets=enabled_toolsets,
+-        disabled_toolsets=disabled_toolsets,
++        disabled_toolsets=effective_disabled_toolsets,
+         quiet_mode=agent.quiet_mode,
+     )
+     
+@@ -1443,8 +1461,8 @@ def init_agent(
+             # Show filtering info if applied
+             if enabled_toolsets:
+                 print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
+-            if disabled_toolsets:
+-                print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
++            if effective_disabled_toolsets:
++                print(f"   ❌ Disabled toolsets: {', '.join(effective_disabled_toolsets)}")
+     elif not agent.quiet_mode:
+         print("🛠️  No tools loaded (all tools filtered out or unavailable)")
+ 
 diff --git a/allies_file_publication_context.py b/allies_file_publication_context.py
 new file mode 100644
 index 0000000..e78a7a2
@@ -33,7 +90,7 @@ index 0000000..e78a7a2
 +def reset_current_allies_file_publication_context(token: Token) -> None:
 +    _CONTEXT.reset(token)
 diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
-index 277bbbb..91ffca3 100644
+index 277bbbb..70fa4fd 100644
 --- a/gateway/platforms/api_server.py
 +++ b/gateway/platforms/api_server.py
 @@ -131,6 +131,19 @@ _ALLIES_INCOMING_FILE_CONTEXT_PROMPT = (
@@ -56,7 +113,7 @@ index 277bbbb..91ffca3 100644
  
  
  def _allies_incoming_file_context_prompt(value: Any) -> Optional[str]:
-@@ -199,24 +212,36 @@ _ALLIES_ROUTINE_RESULT_SYSTEM_PROMPT = (
+@@ -199,24 +212,39 @@ _ALLIES_ROUTINE_RESULT_SYSTEM_PROMPT = (
  
  
  def _allies_routine_enabled_toolsets(
@@ -68,6 +125,9 @@ index 277bbbb..91ffca3 100644
  ) -> list[str]:
      from toolsets import get_toolset_names
  
++    if routine_result and file_publication:
++        raise ValueError("Allies private tool capabilities are mutually exclusive")
++
      enabled: list[str] = []
      for toolset in toolsets:
 -        if toolset == _ALLIES_ROUTINE_RESULT_TOOLSET:
@@ -97,7 +157,7 @@ index 277bbbb..91ffca3 100644
      return list(dict.fromkeys(enabled))
  
  
-@@ -2639,6 +2664,7 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -2639,6 +2667,7 @@ class APIServerAdapter(BasePlatformAdapter):
          session_model: Optional[str] = None,
          confirmed_runtime_lock: bool = False,
          routine_result: bool = False,
@@ -105,7 +165,17 @@ index 277bbbb..91ffca3 100644
      ) -> Any:
          """
          Create an AIAgent instance using the gateway's runtime config.
-@@ -2909,14 +2935,17 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -2673,6 +2702,9 @@ class APIServerAdapter(BasePlatformAdapter):
+         chain, and fails closed if the locked provider's credentials cannot
+         be resolved.
+         """
++        if routine_result and file_publication:
++            raise ValueError("Allies private tool capabilities are mutually exclusive")
++
+         from run_agent import AIAgent
+         from gateway.run import (
+             _checkpoint_agent_kwargs,
+@@ -2909,14 +2941,17 @@ class APIServerAdapter(BasePlatformAdapter):
          enabled_toolsets = _allies_routine_enabled_toolsets(
              sorted(_get_platform_tools(user_config, "api_server")),
              routine_result=routine_result,
@@ -126,7 +196,16 @@ index 277bbbb..91ffca3 100644
          max_iterations = _current_max_iterations()
  
          # Load fallback provider chain so the API server platform has the
-@@ -3890,12 +3919,15 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -2937,6 +2972,8 @@ class APIServerAdapter(BasePlatformAdapter):
+             "verbose_logging": False,
+             "ephemeral_system_prompt": ephemeral_system_prompt or None,
+             "enabled_toolsets": enabled_toolsets,
+             "disabled_toolsets": disabled_toolsets,
++            "allies_routine_result": routine_result,
++            "allies_file_publication": file_publication,
+             "session_id": session_id,
+             "platform": "api_server",
+@@ -3890,12 +3927,15 @@ class APIServerAdapter(BasePlatformAdapter):
              incoming_file_prompt = _allies_incoming_file_context_prompt(
                  body.get("allies_file_context")
              )
@@ -143,7 +222,7 @@ index 277bbbb..91ffca3 100644
              return web.json_response(_openai_error("routine streams cannot use allies_file_context", code="invalid_allies_file_context"), status=400)
          if incoming_file_prompt is not None:
              system_prompt = incoming_file_prompt
-@@ -4107,6 +4139,7 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -4107,6 +4147,7 @@ class APIServerAdapter(BasePlatformAdapter):
                      agent_ref=agent_ref,
                      approval_context=approval_context,
                      routine_result=routine_result_requested,
@@ -151,7 +230,7 @@ index 277bbbb..91ffca3 100644
                      **agent_overrides,
                  )
                  final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
-@@ -6540,6 +6573,7 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -6540,6 +6581,7 @@ class APIServerAdapter(BasePlatformAdapter):
          confirmed_runtime_lock: bool = False,
          approval_context: Optional[Dict[str, Any]] = None,
          routine_result: bool = False,
@@ -159,7 +238,7 @@ index 277bbbb..91ffca3 100644
      ) -> tuple:
          """
          Create an agent and run a conversation in a thread executor.
-@@ -6583,6 +6617,7 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -6583,6 +6625,7 @@ class APIServerAdapter(BasePlatformAdapter):
                  )
                  approval_context_token = None
                  approval_session_token = None
@@ -167,7 +246,7 @@ index 277bbbb..91ffca3 100644
                  agent = None
                  try:
                      if approval_context is not None:
-@@ -6602,6 +6637,16 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -6602,6 +6645,16 @@ class APIServerAdapter(BasePlatformAdapter):
                              # context and in the receipt for resolver auth.
                              approval_context["run_id"]
                          )
@@ -184,7 +263,7 @@ index 277bbbb..91ffca3 100644
                      agent = self._create_agent(
                          ephemeral_system_prompt=ephemeral_system_prompt,
                          session_id=session_id,
-@@ -6617,6 +6662,7 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -6617,6 +6670,7 @@ class APIServerAdapter(BasePlatformAdapter):
                          session_model=session_model,
                          confirmed_runtime_lock=confirmed_runtime_lock,
                          routine_result=routine_result,
@@ -192,7 +271,7 @@ index 277bbbb..91ffca3 100644
                      )
                      if agent_ref is not None:
                          agent_ref[0] = agent
-@@ -6766,6 +6812,17 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -6766,6 +6820,17 @@ class APIServerAdapter(BasePlatformAdapter):
                              reset_current_hermes_approval_context(approval_context_token)
                          except Exception:
                              pass
@@ -222,3 +301,25 @@ index 0f12902..dadb66e 100644
                      )
              if skip_tool_execution_middleware:
                  result = _dispatch(function_args)
+diff --git a/run_agent.py b/run_agent.py
+index 23eb977..08b4bd9 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -447,6 +447,8 @@ class AIAgent:
+         tool_delay: float = None,  # Deprecated: accepted for compatibility, ignored
+         enabled_toolsets: List[str] = None,
+         disabled_toolsets: List[str] = None,
++        allies_routine_result: bool = False,
++        allies_file_publication: bool = False,
+         save_trajectories: bool = False,
+         verbose_logging: bool = False,
+         quiet_mode: bool = False,
+@@ -531,6 +533,8 @@ class AIAgent:
+             max_iterations=max_iterations,
+             enabled_toolsets=enabled_toolsets,
+             disabled_toolsets=disabled_toolsets,
++            allies_routine_result=allies_routine_result,
++            allies_file_publication=allies_file_publication,
+             save_trajectories=save_trajectories,
+             verbose_logging=verbose_logging,
+             quiet_mode=quiet_mode,
