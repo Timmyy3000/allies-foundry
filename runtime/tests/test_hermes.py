@@ -9,8 +9,9 @@ from threading import Event
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
-import allies_runtime.hermes as hermes_module
 import pytest
+
+import allies_runtime.hermes as hermes_module
 from allies_runtime.config import load_settings
 from allies_runtime.errors import (
     HermesAuthenticationError,
@@ -779,18 +780,14 @@ def test_incremental_stream_extracts_one_accepted_typed_routine_result():
         )
         is None
     )
-    terminal = stream._normalize_event(
-        "done", {"session_id": "s1", "run_id": "r1"}
-    )
+    terminal = stream._normalize_event("done", {"session_id": "s1", "run_id": "r1"})
     assert terminal is not None
     assert terminal.payload == {
         "run_id": "r1",
         "status": "completed",
         "outcome": "changed",
         "result_text": "Routine changed.",
-        "references": [
-            {"label": "Source", "url": "https://example.test/source"}
-        ],
+        "references": [{"label": "Source", "url": "https://example.test/source"}],
     }
 
 
@@ -808,9 +805,7 @@ def test_incremental_stream_keeps_typed_result_internal_to_routine_mode():
         )
         is None
     )
-    terminal = stream._normalize_event(
-        "done", {"session_id": "s1", "run_id": "r1"}
-    )
+    terminal = stream._normalize_event("done", {"session_id": "s1", "run_id": "r1"})
     assert terminal is not None
     assert terminal.payload == {"run_id": "r1", "status": "completed"}
 
@@ -1782,15 +1777,11 @@ async def test_streams_send_managed_reasoning_options(monkeypatch, incremental):
         )
         await stream.aclose()
     else:
-        await client.stream_profile(
-            "ally-a", "s1", "hello", reasoning_effort="xhigh"
-        )
+        await client.stream_profile("ally-a", "s1", "hello", reasoning_effort="xhigh")
 
     assert json.loads(calls[0][3]) == {
         "message": "hello",
-        "model_options": {
-            "reasoning": {"enabled": True, "effort": "xhigh"}
-        },
+        "model_options": {"reasoning": {"enabled": True, "effort": "xhigh"}},
     }
 
 
@@ -1798,7 +1789,9 @@ async def test_streams_send_managed_reasoning_options(monkeypatch, incremental):
 @pytest.mark.parametrize(
     "method_name", ["stream", "stream_profile", "stream_profile_incremental"]
 )
-async def test_streams_reject_invalid_reasoning_before_request(monkeypatch, method_name):
+async def test_streams_reject_invalid_reasoning_before_request(
+    monkeypatch, method_name
+):
     client, calls = _client(monkeypatch, FakeResponse())
     method = getattr(client, method_name)
 

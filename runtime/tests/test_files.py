@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+
 from allies_runtime.errors import IncomingFileError
 from allies_runtime.files import (
     cleanup_profile_publication_spools,
