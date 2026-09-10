@@ -36,6 +36,8 @@ MAX_PUBLICATION_BYTES = 50_000_000
 MAX_PROFILE_PUBLICATION_BYTES = 100_000_000
 MAX_VOLUME_PUBLICATION_BYTES = 250_000_000
 MIN_VOLUME_FREE_BYTES = 250_000_000
+MAX_PARTIAL_PUBLICATION_CLEANUP = 100
+PARTIAL_PUBLICATION_STALE_SECONDS = 24 * 60 * 60
 _PUBLICATION_SCHEMA = "allies.publication.v1"
 _RECEIPT_SCHEMA = "allies.incoming-files.v1"
 _publication_locks: dict[str, threading.Lock] = {}
@@ -133,14 +135,14 @@ def prepare_publication_files(
     prepared: list[dict[str, object]] = []
     total = 0
     for relative in source_paths:
-        source = workspace / relative
         try:
-            metadata = source.lstat()
+            _source, metadata = _publication_source(workspace, relative)
+        except IncomingFileError:
+            raise
         except OSError:
             raise IncomingFileError("publication source was unavailable") from None
         if (
-            source.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
+            not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
             or not 1 <= metadata.st_size <= MAX_PUBLICATION_FILE_BYTES
         ):
@@ -165,7 +167,7 @@ def freeze_publication(
     prepared = prepare_publication_files(workspace, paths)
     profile = workspace.parent
     volume_root = profile.parent.parent
-    spool_root = volume_root / ".allies-publications" / profile.name
+    spool_root = _publication_spool_root(volume_root, profile.name)
     manifest_path = spool_root / f"{publication_id}.json"
     existing = _read_publication_manifest(manifest_path, publication_id, source_paths)
     if existing is not None:
@@ -175,7 +177,6 @@ def freeze_publication(
     temporary = spool_root / f".{publication_id}.{os.urandom(8).hex()}.copy"
     final = spool_root / publication_id
     try:
-        _directory(spool_root)
         if final.exists() or temporary.exists():
             raise IncomingFileError("publication spool state was invalid")
         temporary.mkdir(mode=0o700)
@@ -271,7 +272,9 @@ def recover_publication_manifests(
     workspace = _workspace(workspace)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
         raise IncomingFileError("publication recovery limit was invalid")
-    root = workspace.parent.parent.parent / ".allies-publications" / workspace.parent.name
+    root = (
+        workspace.parent.parent.parent / ".allies-publications" / workspace.parent.name
+    )
     if not root.exists():
         return ()
     if root.is_symlink() or not root.is_dir():
@@ -302,14 +305,133 @@ def cleanup_profile_publication_spools(volume_root: Path, profile_key: str) -> N
             raise IncomingFileError("publication spool was unsafe")
         shutil.rmtree(target)
         _sync_directory(root)
-    records = _read_ledger(volume_root)
-    changed = False
-    for publication_id, record in list(records.items()):
-        if record["profile"] == profile_key:
+    with _ledger_lock(volume_root):
+        records = _read_ledger(volume_root)
+        changed = False
+        for publication_id, record in list(records.items()):
+            if record["profile"] == profile_key:
+                del records[publication_id]
+                changed = True
+        if changed:
+            _write_ledger(volume_root, records)
+
+
+def reconcile_publication_spools(volume_root: Path, limit: int = 100) -> int:
+    """Charge committed local snapshots that survived a ledger write failure."""
+
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        raise IncomingFileError("publication reconciliation limit was invalid")
+    root = volume_root / ".allies-publications"
+    if not root.exists():
+        return 0
+    if root.is_symlink() or not root.is_dir():
+        raise IncomingFileError("publication spool was unsafe")
+    discovered: list[tuple[str, PublicationManifest]] = []
+    try:
+        profiles = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        raise IncomingFileError("publication spool was unavailable") from None
+    for profile in profiles:
+        if len(discovered) >= limit:
+            break
+        if profile.is_symlink() or not profile.is_dir():
+            continue
+        try:
+            journals = sorted(profile.glob("*.json"), key=lambda item: item.name)
+        except OSError:
+            continue
+        for journal in journals:
+            if len(discovered) >= limit:
+                break
+            try:
+                publication_id = _command_id(journal.stem)
+                manifest = _read_publication_manifest(journal, publication_id, None)
+            except IncomingFileError:
+                continue
+            if manifest is not None:
+                discovered.append((profile.name, manifest))
+    with _ledger_lock(volume_root):
+        records = _read_ledger(volume_root)
+        changed = False
+        for profile_key, manifest in discovered:
+            size = sum(item.size for item in manifest.files)
+            current = records.get(manifest.publication_id)
+            if current is None:
+                records[manifest.publication_id] = {
+                    "profile": profile_key,
+                    "size": size,
+                    "state": "frozen",
+                    "updated_at": int(time.time()),
+                }
+                changed = True
+            elif (
+                current["profile"] != profile_key
+                or current["size"] != size
+                or current["state"] != "frozen"
+            ):
+                current.update(
+                    profile=profile_key,
+                    size=size,
+                    state="frozen",
+                    updated_at=int(time.time()),
+                )
+                changed = True
+        if changed:
+            _write_ledger(volume_root, records)
+    return len(discovered)
+
+
+def cleanup_stale_publication_copies(
+    volume_root: Path,
+    *,
+    now: float | None = None,
+    limit: int = MAX_PARTIAL_PUBLICATION_CLEANUP,
+) -> int:
+    """Delete only expired incomplete snapshots and their reservation charge."""
+
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        raise IncomingFileError("publication cleanup limit was invalid")
+    observed = time.time() if now is None else now
+    if not isinstance(observed, (int, float)) or isinstance(observed, bool):
+        raise IncomingFileError("publication cleanup time was invalid")
+    root = volume_root / ".allies-publications"
+    if root.exists() and (root.is_symlink() or not root.is_dir()):
+        raise IncomingFileError("publication spool was unsafe")
+    removed = 0
+    with _ledger_lock(volume_root):
+        records = _read_ledger(volume_root)
+        for publication_id, record in sorted(records.items()):
+            if removed >= limit:
+                break
+            if (
+                record["state"] != "copying"
+                or observed - float(record["updated_at"])
+                < PARTIAL_PUBLICATION_STALE_SECONDS
+            ):
+                continue
+            profile_root = root / str(record["profile"])
+            if profile_root.exists() and (
+                profile_root.is_symlink() or not profile_root.is_dir()
+            ):
+                raise IncomingFileError("publication spool was unsafe")
+            manifest_path = profile_root / f"{publication_id}.json"
+            if manifest_path.exists():
+                continue
+            final = profile_root / publication_id
+            candidates = [final, *profile_root.glob(f".{publication_id}.*.copy")]
+            for candidate in candidates:
+                if not candidate.exists():
+                    continue
+                if candidate.is_symlink() or not candidate.is_dir():
+                    raise IncomingFileError("publication spool was unsafe")
+                shutil.rmtree(candidate)
+            if any(candidate.exists() for candidate in candidates):
+                continue
             del records[publication_id]
-            changed = True
-    if changed:
-        _write_ledger(volume_root, records)
+            removed += 1
+        if removed:
+            _write_ledger(volume_root, records)
+    return removed
 
 
 def parse_incoming_files(value: object) -> tuple[IncomingFile, ...]:
@@ -647,6 +769,22 @@ def _directory(path: Path) -> None:
         raise IncomingFileError("incoming file path was unsafe")
 
 
+def _publication_spool_root(volume_root: Path, profile_key: str) -> Path:
+    root = volume_root / ".allies-publications"
+    _directory(root)
+    spool_root = root / profile_key
+    _directory(spool_root)
+    if os.name != "nt":
+        try:
+            os.chown(root, 0, 0)
+            os.chown(spool_root, 0, 0)
+            os.chmod(root, 0o700)
+            os.chmod(spool_root, 0o700)
+        except OSError:
+            raise IncomingFileError("publication spool was unavailable") from None
+    return spool_root
+
+
 def _next_target(root: Path, command_id: str, replay: bool) -> Path:
     _directory(root)
     first = root / command_id
@@ -746,6 +884,7 @@ def _publication_paths(value: Sequence[str]) -> tuple[Path, ...]:
         if (
             not relative
             or candidate.is_absolute()
+            or not candidate.parts
             or ".." in candidate.parts
             or any(part.startswith(".") for part in candidate.parts)
         ):
@@ -759,14 +898,12 @@ def _publication_paths(value: Sequence[str]) -> tuple[Path, ...]:
 def _copy_publication_file(
     workspace: Path, relative: Path, destination: Path, ordinal: int
 ) -> PublicationFile:
-    source = workspace / relative
     try:
-        before = source.lstat()
+        source, before = _publication_source(workspace, relative)
     except OSError:
         raise IncomingFileError("publication source was unavailable") from None
     if (
-        source.is_symlink()
-        or not stat.S_ISREG(before.st_mode)
+        not stat.S_ISREG(before.st_mode)
         or before.st_nlink != 1
         or before.st_size > MAX_PUBLICATION_FILE_BYTES
     ):
@@ -823,6 +960,18 @@ def _copy_publication_file(
         sha256=digest.hexdigest(),
         spool_path=output_name,
     )
+
+
+def _publication_source(workspace: Path, relative: Path) -> tuple[Path, os.stat_result]:
+    current = workspace
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        metadata = current.lstat()
+        if current.is_symlink() or (
+            index < len(relative.parts) - 1 and not stat.S_ISDIR(metadata.st_mode)
+        ):
+            raise IncomingFileError("publication source was unsafe")
+    return current, metadata
 
 
 def _publication_digest(files: Sequence[PublicationFile]) -> str:
@@ -955,7 +1104,9 @@ def _ledger_lock(volume_root: Path):
         try:
             descriptor = os.open(path, flags, 0o600)
         except OSError:
-            raise IncomingFileError("publication reservation journal was unavailable") from None
+            raise IncomingFileError(
+                "publication reservation journal was unavailable"
+            ) from None
         try:
             if fcntl is not None:
                 # ponytail: global volume lock; split only if measured contention requires it.
@@ -989,15 +1140,24 @@ def _read_ledger(volume_root: Path) -> dict[str, dict[str, object]]:
         profile = record.get("profile")
         size = record.get("size")
         state = record.get("state")
+        updated_at = record.get("updated_at", 0)
         if (
             not isinstance(profile, str)
             or not isinstance(size, int)
             or isinstance(size, bool)
             or size < 0
             or state not in {"copying", "frozen"}
+            or not isinstance(updated_at, int)
+            or isinstance(updated_at, bool)
+            or updated_at < 0
         ):
             raise IncomingFileError("publication reservation journal was invalid")
-        result[key] = {"profile": profile, "size": size, "state": state}
+        result[key] = {
+            "profile": profile,
+            "size": size,
+            "state": state,
+            "updated_at": updated_at,
+        }
     return result
 
 
@@ -1045,6 +1205,7 @@ def _reserve_publication(
             "profile": profile_key,
             "size": size,
             "state": "copying",
+            "updated_at": int(time.time()),
         }
         _write_ledger(volume_root, records)
 
@@ -1056,6 +1217,7 @@ def _mark_publication_frozen(volume_root: Path, publication_id: str) -> None:
         if record is None:
             raise IncomingFileError("publication reservation was unavailable")
         record["state"] = "frozen"
+        record["updated_at"] = int(time.time())
         _write_ledger(volume_root, records)
 
 
@@ -1076,10 +1238,12 @@ __all__ = [
     "StagedFile",
     "StagedManifest",
     "cleanup_profile_publication_spools",
+    "cleanup_stale_publication_copies",
     "freeze_publication",
     "parse_incoming_files",
     "prepare_publication_files",
     "publication_spool_path",
+    "reconcile_publication_spools",
     "recover_publication_manifests",
     "release_publication_spool",
     "stage_incoming_files",

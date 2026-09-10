@@ -142,7 +142,9 @@ def _routine_references(
             len(variable_payload) + MAX_ROUTINE_RESULT_FIXED_BYTES
             > MAX_ROUTINE_EVENT_BYTES
         ):
-            raise HermesMalformedResponse("Hermes routine result envelope was too large")
+            raise HermesMalformedResponse(
+                "Hermes routine result envelope was too large"
+            )
     return references
 
 
@@ -931,7 +933,10 @@ class FoundryClient:
             "POST",
             f"/api/v1/runtime/attempts/{_publication_uuid(attempt_id)}/file-publication-intents",
             lease_token=lease_token,
-            body={"tool_call_id": tool_call_id, "files": [dict(item) for item in files]},
+            body={
+                "tool_call_id": tool_call_id,
+                "files": [dict(item) for item in files],
+            },
         )
 
     async def freeze_publication_intent(
@@ -987,9 +992,7 @@ class FoundryClient:
             "X-Allies-Publication-Revision": str(revision),
         }
         if lease_token is not None:
-            headers["X-Allies-Publication-Lease-Token"] = _publication_uuid(
-                lease_token
-            )
+            headers["X-Allies-Publication-Lease-Token"] = _publication_uuid(lease_token)
         return await self._publication_response(
             "PUT",
             "/api/v1/runtime/profiles/"
@@ -1022,7 +1025,9 @@ class FoundryClient:
             body={"limit": limit},
         )
         items = value.get("items")
-        if not isinstance(items, list) or any(not isinstance(item, Mapping) for item in items):
+        if not isinstance(items, list) or any(
+            not isinstance(item, Mapping) for item in items
+        ):
             raise FoundryError(
                 "Foundry publication recovery response was malformed",
                 status=200,
@@ -1645,9 +1650,7 @@ async def _stream_events(
     if callable(method):
         result = method(profile_id, session_id, message, **stream_kwargs)
     else:
-        result = hermes.stream_profile(
-            profile_id, session_id, message, **stream_kwargs
-        )
+        result = hermes.stream_profile(profile_id, session_id, message, **stream_kwargs)
     if inspect.isawaitable(result):
         result = await result
     if hasattr(result, "__aiter__"):
@@ -1756,6 +1759,7 @@ class FoundryWorker:
         self._publication_bridge = publication_bridge
         self._publication_recovery_interval = publication_recovery_interval
         self._last_publication_recovery: float | None = None
+        self._publication_profile_cursor: str | None = None
         self._activity_revision = 0
         self._active: set[asyncio.Task[Any]] = set()
         self._ambiguous_claims: dict[str, float] = {}
@@ -2149,12 +2153,16 @@ class FoundryWorker:
                 await self._bootstrap_first_turn(claim, session_id)
 
             if claim.routine_id is None and self._publication_bridge is not None:
-                publication_context = self._publication_bridge.activate(claim)
+                publication_context = self._publication_bridge.activate(
+                    claim, cancelled=lost.is_set
+                )
 
             file_context = None
             if files is not None:
                 if claim.routine_id is not None:
-                    raise InvalidRequestError("Routine executions cannot use incoming files")
+                    raise InvalidRequestError(
+                        "Routine executions cannot use incoming files"
+                    )
                 if not self._file_input_enabled:
                     raise NotReadyError("incoming file input is disabled")
                 workspace_path = getattr(self._profile_store, "workspace_path", None)
@@ -2660,7 +2668,9 @@ class FoundryWorker:
                     )
                 routine_text = typed_text
                 if len(routine_text.encode("utf-8")) > MAX_ROUTINE_TEXT_BYTES:
-                    raise HermesMalformedResponse("Hermes routine result text was too large")
+                    raise HermesMalformedResponse(
+                        "Hermes routine result text was too large"
+                    )
                 references = _routine_references(
                     terminal.payload.get("references", []),
                     text=routine_text,
@@ -3126,17 +3136,33 @@ class FoundryWorker:
             < self._publication_recovery_interval
         ):
             return
-        profiles = getattr(snapshot, "profiles", ()) if snapshot is not None else ()
+        profiles = sorted(
+            (
+                (profile_id, profile_key)
+                for profile in (getattr(snapshot, "profiles", ()) if snapshot else ())
+                if isinstance((profile_id := getattr(profile, "profile_id", None)), str)
+                and isinstance(
+                    (profile_key := getattr(profile, "hermes_profile_key", None)), str
+                )
+            ),
+            key=lambda item: item[0],
+        )
+        if not profiles:
+            return
         self._last_publication_recovery = now
-        for profile in profiles[:1]:
-            profile_id = getattr(profile, "profile_id", None)
-            profile_key = getattr(profile, "hermes_profile_key", None)
-            if not isinstance(profile_id, str) or not isinstance(profile_key, str):
-                continue
-            try:
-                await bridge.recover(profile_id, profile_key, limit=20)
-            except (FoundryError, IncomingFileError, OSError, ValueError):
-                continue
+        profile_id, profile_key = next(
+            (
+                item
+                for item in profiles
+                if item[0] > (self._publication_profile_cursor or "")
+            ),
+            profiles[0],
+        )
+        self._publication_profile_cursor = profile_id
+        try:
+            await bridge.recover(profile_id, profile_key, limit=20)
+        except (FoundryError, IncomingFileError, OSError, ValueError):
+            return
 
     async def _reconcile_profiles(self, *, force: bool = False) -> None:
         if self.profile_reconciler is None:

@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,9 +19,11 @@ except ImportError:  # pragma: no cover - exercised by Windows test imports
 
 from .errors import IncomingFileError
 from .files import (
+    cleanup_stale_publication_copies,
     freeze_publication,
     prepare_publication_files,
     publication_spool_path,
+    reconcile_publication_spools,
     recover_publication_manifests,
     release_publication_spool,
 )
@@ -33,6 +35,8 @@ MAX_REQUEST_BYTES = 8 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024
 BRIDGE_TIMEOUT_SECONDS = 305
 BRIDGE_GROUP = "allies-publication"
+PUBLICATION_READY_TIMEOUT_SECONDS = 300
+PUBLICATION_POLL_SECONDS = 5
 _CONTEXT = re.compile(r"^[0-9a-f]{64}$")
 _TOOL_CALL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -44,23 +48,30 @@ class _Session:
     profile_id: str
     profile_key: str
     lease_token: str
+    cancelled: Callable[[], bool] | None
 
 
 class PublicationBridge:
     """Keep tool authority in the active runtime claim, outside model input."""
 
-    def __init__(self, foundry: Any, profile_store: Any, volume_root: str | Path) -> None:
+    def __init__(
+        self, foundry: Any, profile_store: Any, volume_root: str | Path
+    ) -> None:
         self._foundry = foundry
         self._profile_store = profile_store
-        self._root = Path(volume_root) / BRIDGE_DIRECTORY
+        self._volume_root = Path(volume_root)
+        self._root = self._volume_root / BRIDGE_DIRECTORY
         self._sessions: dict[str, _Session] = {}
         self._server: asyncio.AbstractServer | None = None
+        self._last_partial_cleanup: float | None = None
 
     @property
     def socket_path(self) -> Path:
         return self._root / BRIDGE_SOCKET_NAME
 
-    def activate(self, claim: Any) -> str:
+    def activate(
+        self, claim: Any, *, cancelled: Callable[[], bool] | None = None
+    ) -> str:
         nonce = os.urandom(32).hex()
         self._sessions[nonce] = _Session(
             attempt_id=str(claim.attempt_id),
@@ -68,6 +79,7 @@ class PublicationBridge:
             profile_id=str(claim.profile_id),
             profile_key=str(claim.hermes_profile_key),
             lease_token=str(claim.lease_token),
+            cancelled=cancelled,
         )
         return nonce
 
@@ -77,6 +89,9 @@ class PublicationBridge:
     async def start(self) -> None:
         if os.name == "nt":
             return
+        await asyncio.to_thread(reconcile_publication_spools, self._volume_root)
+        await asyncio.to_thread(cleanup_stale_publication_copies, self._volume_root)
+        self._last_partial_cleanup = asyncio.get_running_loop().time()
         self._root.mkdir(mode=0o750, parents=True, exist_ok=True)
         try:
             if grp is None:
@@ -109,41 +124,53 @@ class PublicationBridge:
         if not isinstance(paths, Sequence) or isinstance(paths, (str, bytes)):
             return _failed("publication_request_invalid")
         session = self._sessions.get(context)
-        if session is None:
+        if session is None or not _session_active(self._sessions, context, session):
             return _failed("publication_context_invalid")
-        if not isinstance(tool_call_id, str) or _TOOL_CALL.fullmatch(tool_call_id) is None:
+        if (
+            not isinstance(tool_call_id, str)
+            or _TOOL_CALL.fullmatch(tool_call_id) is None
+        ):
             return _failed("publication_request_invalid")
+        deadline = asyncio.get_running_loop().time() + PUBLICATION_READY_TIMEOUT_SECONDS
         publication_id: str | None = None
         try:
             workspace = self._profile_store.workspace_path(session.profile_key)
-            prepared = await asyncio.to_thread(prepare_publication_files, workspace, paths)
+            prepared = await asyncio.to_thread(
+                prepare_publication_files, workspace, paths
+            )
+            if not _session_active(self._sessions, context, session):
+                return _failed("publication_context_invalid")
             intent = await self._foundry.create_publication_intent(
                 session.attempt_id, session.lease_token, tool_call_id, prepared
             )
             publication_id = _uuid(intent.get("publication_id"))
+            if not _session_active(self._sessions, context, session):
+                return _failed("publication_context_invalid", publication_id)
             manifest = await asyncio.to_thread(
                 freeze_publication, workspace, publication_id, paths
             )
             frozen = manifest.frozen_files()
+            if not _session_active(self._sessions, context, session):
+                return _failed("publication_context_invalid", publication_id)
             await self._foundry.freeze_publication_intent(
                 session.profile_id, publication_id, frozen
             )
+            if not _session_active(self._sessions, context, session):
+                return _failed("publication_context_invalid", publication_id)
             reservation = await self._foundry.register_publication(
                 session.attempt_id, session.lease_token, publication_id, frozen
             )
             revision = reservation.get("revision")
             rows = reservation.get("files")
             if not isinstance(revision, int) or isinstance(revision, bool):
-                return _failed("publication_response_invalid")
-            if not isinstance(rows, list) or len(rows) != len(manifest.files):
-                return _failed("publication_response_invalid")
-            for frozen_file, row in zip(manifest.files, rows, strict=True):
-                if not isinstance(row, Mapping):
-                    return _failed("publication_response_invalid")
+                return _failed("publication_response_invalid", publication_id)
+            rows_by_source = _cloud_file_rows(rows, manifest)
+            for frozen_file in manifest.files:
+                if not _session_active(self._sessions, context, session):
+                    return _failed("publication_context_invalid", publication_id)
+                row = rows_by_source[frozen_file.source_version_id]
                 file_id = _uuid(row.get("id"))
-                generation = row.get("generation")
-                if not isinstance(generation, int) or isinstance(generation, bool):
-                    return _failed("publication_response_invalid")
+                generation = _generation(row.get("generation"))
                 spool = await asyncio.to_thread(
                     publication_spool_path,
                     workspace,
@@ -151,6 +178,8 @@ class PublicationBridge:
                     frozen_file.source_version_id,
                 )
                 content = await asyncio.to_thread(spool.read_bytes)
+                if not _session_active(self._sessions, context, session):
+                    return _failed("publication_context_invalid", publication_id)
                 await self._foundry.upload_publication_file(
                     session.profile_id,
                     publication_id,
@@ -159,17 +188,56 @@ class PublicationBridge:
                     content,
                     revision,
                 )
-            view = await self._foundry.get_publication(session.profile_id, publication_id)
-        except (FoundryError, IncomingFileError, OSError, ValueError):
+            result = await self._wait_for_ready(
+                context, session, publication_id, deadline
+            )
+        except (FoundryError, IncomingFileError, OSError, TypeError, ValueError):
             return _failed("publication_unavailable", publication_id)
-        result = _ready_view(view, publication_id)
         if result.get("state") == "ready":
-            await asyncio.to_thread(release_publication_spool, workspace, publication_id)
+            await asyncio.to_thread(
+                release_publication_spool, workspace, publication_id
+            )
         return result
+
+    async def _wait_for_ready(
+        self,
+        context: str,
+        session: _Session,
+        publication_id: str,
+        deadline: float,
+    ) -> dict[str, object]:
+        while _session_active(self._sessions, context, session):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return _failed("publication_pending", publication_id)
+            try:
+                view = await asyncio.wait_for(
+                    self._foundry.get_publication(session.profile_id, publication_id),
+                    remaining,
+                )
+            except TimeoutError:
+                return _failed("publication_pending", publication_id)
+            if not isinstance(view, Mapping):
+                raise TypeError("publication response was invalid")
+            state = view.get("state")
+            if state == "failed":
+                return _failed("publication_failed", publication_id)
+            result = _ready_view(view, publication_id)
+            if state == "ready":
+                return result
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return _failed("publication_pending", publication_id)
+            await asyncio.sleep(min(PUBLICATION_POLL_SECONDS, remaining))
+        return _failed("publication_context_invalid", publication_id)
 
     async def recover(self, profile_id: str, profile_key: str, limit: int = 20) -> None:
         """Resume frozen work from the original intent without a model call."""
 
+        now = asyncio.get_running_loop().time()
+        if self._last_partial_cleanup is None or now - self._last_partial_cleanup >= 60:
+            await asyncio.to_thread(cleanup_stale_publication_copies, self._volume_root)
+            self._last_partial_cleanup = now
         workspace = self._profile_store.workspace_path(profile_key)
         manifests = await asyncio.to_thread(
             recover_publication_manifests, workspace, limit
@@ -194,30 +262,34 @@ class PublicationBridge:
                 revision = claim.get("revision")
                 lease_token = _uuid(claim.get("lease_token"))
                 rows = claim.get("files")
-                if not isinstance(revision, int) or not isinstance(rows, list):
+                if (
+                    not isinstance(revision, int)
+                    or isinstance(revision, bool)
+                    or revision < 1
+                ):
                     continue
                 manifest = by_id.get(publication_id)
                 if manifest is None:
                     continue
-                local = {item.source_version_id: item for item in manifest.files}
-                for row in rows:
-                    if not isinstance(row, Mapping):
-                        raise TypeError("publication retry row was invalid")
-                    source_version_id = _uuid(row.get("source_version_id"))
-                    if source_version_id not in local:
-                        raise KeyError(source_version_id)
+                rows_by_source = _cloud_file_rows(rows, manifest)
+                for source_version_id, local_file in (
+                    (item.source_version_id, item) for item in manifest.files
+                ):
+                    row = rows_by_source[source_version_id]
+                    if row.get("state") == "ready":
+                        continue
                     content_path = await asyncio.to_thread(
                         publication_spool_path,
                         workspace,
                         publication_id,
-                        source_version_id,
+                        local_file.source_version_id,
                     )
                     content = await asyncio.to_thread(content_path.read_bytes)
                     await self._foundry.upload_publication_file(
                         profile_id,
                         publication_id,
                         _uuid(row.get("id")),
-                        int(row.get("generation")),
+                        _generation(row.get("generation")),
                         content,
                         revision,
                         lease_token,
@@ -238,9 +310,7 @@ class PublicationBridge:
     ) -> None:
         try:
             try:
-                raw = await asyncio.wait_for(
-                    reader.readline(), BRIDGE_TIMEOUT_SECONDS
-                )
+                raw = await asyncio.wait_for(reader.readline(), BRIDGE_TIMEOUT_SECONDS)
             except ValueError:
                 raw = b""
             if not raw or len(raw) > MAX_REQUEST_BYTES or not raw.endswith(b"\n"):
@@ -251,7 +321,9 @@ class PublicationBridge:
                 except json.JSONDecodeError:
                     value = None
                 if not isinstance(value, Mapping) or set(value) != {
-                    "context", "tool_call_id", "paths"
+                    "context",
+                    "tool_call_id",
+                    "paths",
                 }:
                     result = _failed("publication_request_invalid")
                 else:
@@ -260,7 +332,9 @@ class PublicationBridge:
                         value.get("tool_call_id"),
                         value.get("paths"),
                     )
-            encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
+            encoded = json.dumps(
+                result, ensure_ascii=False, separators=(",", ":")
+            ).encode()
             if len(encoded) > MAX_RESPONSE_BYTES:
                 encoded = (
                     b'{"state":"failed","retryable":true,'
@@ -271,6 +345,14 @@ class PublicationBridge:
         finally:
             writer.close()
             await writer.wait_closed()
+
+
+def _session_active(
+    sessions: Mapping[str, _Session], context: str, session: _Session
+) -> bool:
+    if sessions.get(context) is not session:
+        return False
+    return session.cancelled is None or not session.cancelled()
 
 
 def _uuid(value: object) -> str:
@@ -289,6 +371,35 @@ def _failed(code: str, publication_id: str | None = None) -> dict[str, object]:
     if publication_id is not None:
         result["publication_id"] = publication_id
     return result
+
+
+def _cloud_file_rows(rows: object, manifest: Any) -> dict[str, Mapping[str, object]]:
+    if not isinstance(rows, list) or len(rows) != len(manifest.files):
+        raise ValueError("publication response was invalid")
+    expected = {item.source_version_id: item for item in manifest.files}
+    resolved: dict[str, Mapping[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise TypeError("publication response was invalid")
+        source_version_id = _uuid(row.get("source_version_id"))
+        expected_file = expected.get(source_version_id)
+        if (
+            expected_file is None
+            or row.get("sha256") != expected_file.sha256
+            or row.get("size") != expected_file.size
+            or source_version_id in resolved
+        ):
+            raise ValueError("publication response was invalid")
+        resolved[source_version_id] = row
+    if len(resolved) != len(expected):
+        raise ValueError("publication response was invalid")
+    return resolved
+
+
+def _generation(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError("publication generation was invalid")
+    return value
 
 
 def _ready_view(value: Mapping[str, object], publication_id: str) -> dict[str, object]:
