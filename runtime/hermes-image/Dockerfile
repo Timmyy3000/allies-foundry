@@ -61,8 +61,15 @@ COPY plugins/routine-result/ /opt/hermes/plugins/routine-result/
 
 # Hermes connects to a root-owned runtime socket but cannot replace it.
 RUN groupadd --gid 10001 allies-publication \
-    && usermod --append --groups allies-publication "$(getent passwd 10000 | cut -d: -f1)" \
-    && install -d -m 0750 -o root -g allies-publication /opt/data/.allies-publication-bridge
+    && usermod --append --groups allies-publication "$(getent passwd 10000 | cut -d: -f1)"
+
+COPY --chmod=0755 allies-volume-boundary.sh /opt/hermes/docker/allies-volume-boundary.sh
+COPY patches/volume-ownership-boundary.patch /tmp/allies-volume-ownership-boundary.patch
+RUN cd /opt/hermes \
+    && sed -i 's/\r$//' /tmp/allies-volume-ownership-boundary.patch \
+    && git apply --check --whitespace=nowarn /tmp/allies-volume-ownership-boundary.patch \
+    && git apply --whitespace=nowarn /tmp/allies-volume-ownership-boundary.patch \
+    && rm -f /tmp/allies-volume-ownership-boundary.patch
 
 # Keep the private Allies transcript seam as a small, pinned-source overlay.
 # A rejected hunk must fail the image build instead of silently shipping an
