@@ -655,6 +655,16 @@ async def stage_incoming_files(
             )
         _check_cancelled(cancelled)
         _directory(final_root.parent)
+        if os.name != "nt" and os.geteuid() == 0:
+            for item in files:
+                os.chown(
+                    temporary / item.descriptor.file_id,
+                    10000,
+                    10000,
+                    follow_symlinks=False,
+                )
+            os.chown(temporary, 10000, 10000, follow_symlinks=False)
+            os.chown(final_root.parent, 10000, 10000, follow_symlinks=False)
         _check_cancelled(cancelled)
         os.replace(temporary, final_root)
         committed = True
@@ -942,9 +952,7 @@ def _safe_media_type(value: object) -> bool:
         isinstance(value, str)
         and 1 <= len(value.encode("utf-8")) <= 127
         and "/" in value
-        and not any(
-            ord(character) < 0x20 or ord(character) == 0x7F for character in value
-        )
+        and not any(not 0x20 <= ord(character) <= 0x7E for character in value)
     )
 
 
@@ -1031,7 +1039,7 @@ def _copy_publication_file(
         raise IncomingFileError("publication source was unsafe")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(source, flags)
+        descriptor = _open_publication_source(source, flags)
     except OSError:
         raise IncomingFileError("publication source was unavailable") from None
     output_name = f"{ordinal:02d}-{uuid4().hex}.bin"
@@ -1081,6 +1089,21 @@ def _copy_publication_file(
         sha256=digest.hexdigest(),
         spool_path=output_name,
     )
+
+
+def _open_publication_source(source: Path, flags: int) -> int:
+    if os.name == "nt":
+        return os.open(source, flags)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(source.anchor, directory_flags)
+    try:
+        for part in source.parts[1:-1]:
+            child = os.open(part, directory_flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        return os.open(source.name, flags | os.O_NONBLOCK, dir_fd=parent)
+    finally:
+        os.close(parent)
 
 
 def _publication_source(workspace: Path, relative: Path) -> tuple[Path, os.stat_result]:

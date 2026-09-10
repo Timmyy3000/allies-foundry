@@ -85,3 +85,6 @@ Production requires the Cloud connection; debug-only checks may run without it,
 but file requests still fail safely until the connection is configured.
 The publication socket requires the root runtime service identity; an
 unprivileged worker leaves shared bridge state untouched and publication unavailable.
+The deployment entrypoint retains root for the trusted runtime and its private
+credential files. Hermes runs separately as UID 10000 and cannot modify the
+runtime-owned publication state.

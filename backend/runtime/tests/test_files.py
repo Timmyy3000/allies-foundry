@@ -6,8 +6,10 @@ from uuid import uuid4
 
 import pytest
 from django.utils import timezone
+from pydantic import ValidationError
 
 import runtime.services.files as file_service
+from runtime.contracts import FileInputV1
 from runtime.exceptions import RuntimeLeaseConflictError, RuntimeValidationError
 from runtime.models import (
     Execution,
@@ -101,7 +103,9 @@ def file_claim(db):
 
 
 @pytest.mark.django_db
-def test_proxy_derives_cloud_scope_from_the_current_attempt(file_claim, settings, monkeypatch):
+def test_proxy_derives_cloud_scope_from_the_current_attempt(
+    file_claim, settings, monkeypatch
+):
     context, claim, execution, file_id, content = file_claim
     settings.ALLIES_RUNTIME_FILE_INPUT_ENABLED = True
     settings.ALLIES_CLOUD_URL = "https://cloud.example.test"
@@ -124,11 +128,38 @@ def test_proxy_derives_cloud_scope_from_the_current_attempt(file_claim, settings
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "media_type",
+    ["text/中文", "text/pläin", "text/plain\r\nX-Test: yes", "text/plain\x7f"],
+)
+def test_unsafe_media_type_is_rejected_at_ingress_and_before_proxying(
+    file_claim, settings, monkeypatch, media_type
+):
+    context, claim, execution, file_id, _content = file_claim
+    settings.ALLIES_RUNTIME_FILE_INPUT_ENABLED = True
+    descriptor = execution.input_payload["files"][0]
+    descriptor["media_type"] = media_type
+    with pytest.raises(ValidationError):
+        FileInputV1.model_validate(descriptor)
+    execution.save(update_fields=["input_payload"])
+    opener = _Opener(_Response(b"unused"))
+    monkeypatch.setattr(file_service, "build_opener", lambda *_handlers: opener)
+
+    with pytest.raises(RuntimeLeaseConflictError, match="manifest is invalid"):
+        file_service.open_incoming_file(
+            context, claim.attempt_id, claim.lease_token, file_id
+        )
+    assert opener.requests == []
+
+
+@pytest.mark.django_db
 def test_proxy_denies_a_file_outside_the_frozen_manifest(file_claim, settings):
     context, claim, _execution, _file_id, _content = file_claim
     settings.ALLIES_RUNTIME_FILE_INPUT_ENABLED = True
 
-    with pytest.raises(RuntimeLeaseConflictError, match="not in the execution manifest"):
+    with pytest.raises(
+        RuntimeLeaseConflictError, match="not in the execution manifest"
+    ):
         file_service.open_incoming_file(
             context, claim.attempt_id, claim.lease_token, uuid4()
         )

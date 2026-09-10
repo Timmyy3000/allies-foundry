@@ -1174,7 +1174,9 @@ class ProfileStore:
             profiles = self.volume_root / "profiles"
             if _is_symlink(profiles):
                 raise ProfileStoreError("profile namespace is symlinked")
-            profiles.mkdir(exist_ok=True)
+            profiles.mkdir(mode=0o755, exist_ok=True)
+            if os.name != "nt" and os.geteuid() == 0:
+                os.chmod(profiles, 0o755)
             if not _is_directory(profiles):
                 raise ProfileStoreError("profile namespace is not a directory")
             return profiles
@@ -1541,6 +1543,10 @@ class ProfileStore:
                 _canonical_json(manifest) + b"\n",
                 mode=0o644,
             )
+            if os.name != "nt" and os.geteuid() == 0:
+                for child in temporary.iterdir():
+                    os.chown(child, 10000, 10000, follow_symlinks=False)
+                os.chown(temporary, 10000, 10000, follow_symlinks=False)
             self._sync_directory(temporary)
             return key, receipt_id
         except ProfileStoreError:

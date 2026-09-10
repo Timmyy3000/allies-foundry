@@ -261,8 +261,9 @@ def test_proof_spec_mounts_each_dependency_only_in_its_consumer():
     assert runtime.entrypoint[:2] == ("sh", "-c")
     assert "chown -R" not in runtime.entrypoint[2]
     assert 'while [ "$(stat -c %u:%a /opt/data)" != 0:1777 ]' in runtime.entrypoint[2]
-    assert "setpriv --reuid=10000 --regid=10000" in runtime.entrypoint[2]
-    assert runtime.entrypoint[2].endswith("python -m allies_runtime")
+    assert "setpriv" not in runtime.entrypoint[2]
+    assert "chown 0:0 /run/secrets" in runtime.entrypoint[2]
+    assert runtime.entrypoint[2].endswith("exec python -m allies_runtime")
     assert runtime.environment["HERMES_STREAM_TIMEOUT"] == "180"
     assert runtime.environment["HERMES_REQUEST_TIMEOUT"] == "180"
     assert "/run/secrets/foundry-runtime-token" in runtime.entrypoint[2]

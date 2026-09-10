@@ -102,7 +102,9 @@ class FirstTurnBootstrap(ContractModel):
 class FileInputV1(ContractModel):
     file_id: UUID
     name: StrictStr = Field(..., min_length=1, max_length=255)
-    media_type: StrictStr = Field(..., min_length=1, max_length=127)
+    media_type: StrictStr = Field(
+        ..., min_length=1, max_length=127, pattern=r"^[\x20-\x7e]+/[\x20-\x7e]+$"
+    )
     size: StrictInt = Field(..., ge=1, le=25_000_000)
     sha256: StrictStr = Field(..., pattern=r"^[0-9a-f]{64}$")
 

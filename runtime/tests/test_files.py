@@ -145,6 +145,17 @@ def test_manifest_rejects_a_windows_reserved_file_name():
         parse_incoming_files([descriptor])
 
 
+@pytest.mark.parametrize(
+    "media_type",
+    ["text/中文", "text/pläin", "text/plain\r\nX-Test: yes", "text/plain\x7f"],
+)
+def test_manifest_rejects_unsafe_media_types(media_type):
+    descriptor = _descriptor(b"one")
+    descriptor["media_type"] = media_type
+    with pytest.raises(IncomingFileError):
+        parse_incoming_files([descriptor])
+
+
 @pytest.mark.asyncio
 async def test_stage_accepts_character_bounded_names_without_using_them_as_paths(
     tmp_path,
