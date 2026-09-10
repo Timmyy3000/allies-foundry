@@ -1,4 +1,5 @@
 from io import BytesIO
+from urllib.error import HTTPError
 from uuid import UUID
 
 import pytest
@@ -8,6 +9,7 @@ from allies_runtime.foundry import (
     FoundryError,
     InvalidRequestError,
     ResponseLossError,
+    UrllibFoundryTransport,
 )
 
 ATTEMPT, PROFILE, PUBLICATION, FILE, LEASE = [UUID(int=n) for n in range(1, 6)]
@@ -245,3 +247,48 @@ async def test_corrupt_or_broken_incoming_stream_is_closed(result):
             )
         ]
     assert response.closed
+
+
+@pytest.mark.asyncio
+async def test_http_stream_open_does_not_buffer_body(monkeypatch):
+    response = BytesIO(b"private file")
+    response.status = 200
+    calls = []
+
+    def open_response(request, timeout):
+        calls.append((request.full_url, timeout, request.get_header("Authorization")))
+        return response
+
+    monkeypatch.setattr("urllib.request.urlopen", open_response)
+    transport = UrllibFoundryTransport("https://foundry.example", timeout=10)
+    opened = await transport.stream(
+        "GET",
+        "/api/v1/runtime/files/content",
+        headers={"Authorization": "Bearer runtime-only"},
+    )
+    assert calls == [
+        (
+            "https://foundry.example/api/v1/runtime/files/content",
+            10,
+            "Bearer runtime-only",
+        )
+    ]
+    assert opened == {"status": 200, "response": response}
+    assert response.tell() == 0
+    response.close()
+
+
+@pytest.mark.asyncio
+async def test_http_stream_error_body_is_bounded_and_closed(monkeypatch):
+    body = BytesIO(b"x" * 20_000)
+
+    def denied(*_args, **_kwargs):
+        raise HTTPError("https://foundry.example", 404, "unavailable", {}, body)
+
+    monkeypatch.setattr("urllib.request.urlopen", denied)
+    result = await UrllibFoundryTransport("https://foundry.example").stream(
+        "GET", "/file", headers={}
+    )
+    assert result["status"] == 404
+    assert len(result["body"]) == 16_385
+    assert body.closed
