@@ -592,12 +592,22 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
                 "tool_call",
             }:
                 continue
+            arguments = function.get("arguments")
+            if function.get("name") == "tool_call":
+                try:
+                    decoded = json.loads(arguments)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if (
+                    not isinstance(decoded, Mapping)
+                    or decoded.get("name") != _ROUTINE_RESULT_TOOL
+                ):
+                    continue
             call_id = tool_call.get("id")
             if not isinstance(call_id, str) or not _TOOL_CALL_ID.fullmatch(call_id):
                 raise HermesMalformedResponse(
                     "Hermes routine result tool call identity was invalid"
                 )
-            arguments = function.get("arguments")
             if not isinstance(arguments, str) or not arguments:
                 raise HermesMalformedResponse(
                     "Hermes routine result tool arguments were invalid"
@@ -606,18 +616,14 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
                 raise HermesMalformedResponse(
                     "Hermes routine result tool arguments were too large"
                 )
-            try:
-                decoded = json.loads(arguments)
-            except json.JSONDecodeError as exc:
-                raise HermesMalformedResponse(
-                    "Hermes routine result tool arguments were not JSON"
-                ) from exc
+            if function.get("name") == _ROUTINE_RESULT_TOOL:
+                try:
+                    decoded = json.loads(arguments)
+                except json.JSONDecodeError as exc:
+                    raise HermesMalformedResponse(
+                        "Hermes routine result tool arguments were not JSON"
+                    ) from exc
             if function.get("name") == "tool_call":
-                if (
-                    not isinstance(decoded, Mapping)
-                    or decoded.get("name") != _ROUTINE_RESULT_TOOL
-                ):
-                    continue
                 # A rejected wrapper never invoked the result tool and may be retried.
                 responses = [
                     item
@@ -661,6 +667,8 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
         if not isinstance(tool_call_id, str) or not _TOOL_CALL_ID.fullmatch(
             tool_call_id
         ):
+            if message.get("tool_name") != _ROUTINE_RESULT_TOOL:
+                continue
             raise HermesMalformedResponse(
                 "Hermes routine result tool response identity was invalid"
             )

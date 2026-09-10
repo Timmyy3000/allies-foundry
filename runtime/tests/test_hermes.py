@@ -909,13 +909,21 @@ def test_wrapped_result_rejects_malformed_envelopes(side, malformation):
         )
         value = {
             "empty": "",
-            "oversized": "x" * (hermes_module._MAX_ROUTINE_ARGUMENT_BYTES + 1),
+            "oversized": json.dumps(
+                {
+                    "name": "allies_routine_result",
+                    "arguments": "x" * hermes_module._MAX_ROUTINE_ARGUMENT_BYTES,
+                }
+            ),
             "json": "{",
         }[malformation]
         error = {"empty": "invalid", "oversized": "too large", "json": "not JSON"}[
             malformation
         ]
     target[key] = value
+    if side == "call" and malformation in {"empty", "json"}:
+        assert hermes_module._routine_result_from_transcript(messages) is None
+        return
     with pytest.raises(HermesMalformedResponse, match=error):
         hermes_module._routine_result_from_transcript(messages)
 
@@ -972,6 +980,43 @@ def test_other_wrapped_tools_do_not_count_as_routine_results():
         '{"name":"web_search","arguments":{}}'
     )
     prior[1].update(tool_call_id="search", tool_name="web_search")
+    result = hermes_module._routine_result_from_transcript(
+        prior + _wrapped_routine_messages()
+    )
+    assert result["outcome"] == "changed"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        None,
+        "",
+        "{",
+        "null",
+        "[]",
+        '{"name":"web_search","arguments":{}}',
+        json.dumps({"name": "web_search", "arguments": "x" * 65537}),
+    ],
+    ids=["missing", "empty", "invalid-json", "null", "list", "other-tool", "oversized"],
+)
+def test_malformed_unrelated_wrapper_does_not_abort_recovered_result(arguments):
+    prior = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "bad identity",
+                    "function": {"name": "tool_call", "arguments": arguments},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "bad identity",
+            "tool_name": "tool_call",
+            "content": '{"error":"invalid call"}',
+        },
+    ]
     result = hermes_module._routine_result_from_transcript(
         prior + _wrapped_routine_messages()
     )
