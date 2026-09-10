@@ -8,7 +8,6 @@ import socket
 import stat
 from pathlib import Path
 
-
 ROOT = Path("/opt/data/.allies-publication-bridge")
 SOCKET = ROOT / "socket"
 UID = 10000

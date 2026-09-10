@@ -1,3 +1,4 @@
+# ruff: noqa: N999  # Hermes discovers this required hyphenated plugin ID.
 """Private Hermes tool registration for bounded Allies file publication."""
 
 from __future__ import annotations

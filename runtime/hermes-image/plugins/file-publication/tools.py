@@ -8,7 +8,6 @@ from typing import Any
 
 from allies_file_publication_context import get_current_allies_file_publication_context
 
-
 _SOCKET_PATH = "/opt/data/.allies-publication-bridge/socket"
 _MAX_REQUEST_BYTES = 8 * 1024
 _MAX_RESPONSE_BYTES = 64 * 1024
@@ -106,7 +105,8 @@ def _ready(value: dict[str, Any], context: str) -> str | None:
         name = item.get("name")
         open_path = item.get("open_path")
         try:
-            name_bytes = name.encode("utf-8") if isinstance(name, str) else b""
+            if isinstance(name, str):
+                name.encode("utf-8")
             open_path_bytes = (
                 open_path.encode("utf-8") if isinstance(open_path, str) else b""
             )

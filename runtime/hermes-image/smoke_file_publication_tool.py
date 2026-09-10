@@ -16,9 +16,9 @@ from allies_file_publication_context import (
 )
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import (
-    APIServerAdapter,
     _ALLIES_FILE_PUBLICATION_TOOLSET,
     _ALLIES_ROUTINE_RESULT_TOOLSET,
+    APIServerAdapter,
     _allies_file_publication_context,
     _allies_routine_enabled_toolsets,
 )
@@ -27,7 +27,6 @@ from model_tools import get_tool_definitions, handle_function_call
 from run_agent import AIAgent
 from tools.thread_context import propagate_context_to_thread
 from toolsets import TOOLSETS, create_custom_toolset
-
 
 SOCKET_PATH = Path("/opt/data/.allies-publication-bridge/socket")
 NONCE_A = "a" * 64
@@ -71,7 +70,12 @@ def _serve(
                         raise AssertionError("publication request had trailing data")
                     requests.append(json.loads(line.decode("utf-8")))
                     connection.sendall(response)
-        except BaseException as error:
+        except (
+            AssertionError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as error:
             errors.append(error)
         finally:
             server.close()
@@ -142,10 +146,13 @@ def _agent_tools(**capability: object) -> set[str]:
 
 
 def _test_private_capability_boundary() -> None:
-    assert not {
-        "publish_files",
-        "allies_routine_result",
-    } & _agent_tools()
+    assert (
+        not {
+            "publish_files",
+            "allies_routine_result",
+        }
+        & _agent_tools()
+    )
     assert not {
         "publish_files",
         "allies_routine_result",
@@ -302,8 +309,7 @@ def main() -> None:
     try:
         unicode_ready = json.loads(
             handle_function_call(
-                "publish_files",
-                {"paths": ["out.csv"]}, tool_call_id="call-unicode"
+                "publish_files", {"paths": ["out.csv"]}, tool_call_id="call-unicode"
             )
         )
     finally:
