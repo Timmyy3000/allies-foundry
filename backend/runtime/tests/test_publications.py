@@ -283,14 +283,28 @@ def test_newer_cloud_retry_reopens_an_exhausted_frozen_manifest(
     assert intent.attempts == PublicationIntent.MAX_ATTEMPTS
     assert intent.manifest_digest == digest
     assert intent.cloud_revision == 2
+    assert intent.cloud_retry_revision == 2
+
+    claimed_revision = 1
     assert claim_publication_retries(context, profile.id, 20) == ()
 
-    claimed_revision = 3
-    assert claim_publication_retries(context, profile.id, 20)[0]["revision"] == 3
+    claimed_revision = 2
+    assert claim_publication_retries(context, profile.id, 20)[0]["revision"] == 2
     intent.refresh_from_db()
     assert intent.state == PublicationIntentState.REGISTERED
     assert intent.attempts == PublicationIntent.MAX_ATTEMPTS
     assert intent.manifest_digest == digest
+    upload_publication_file(
+        context,
+        profile.id,
+        intent.id,
+        uuid4(),
+        2,
+        b"frozen bytes",
+        2,
+        uuid4(),
+    )
+    assert len(uploaded) == 2
 
 
 @pytest.mark.django_db

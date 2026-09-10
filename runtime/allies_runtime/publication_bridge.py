@@ -239,9 +239,12 @@ class PublicationBridge:
             await asyncio.to_thread(cleanup_stale_publication_copies, self._volume_root)
             self._last_partial_cleanup = now
         workspace = self._profile_store.workspace_path(profile_key)
-        manifests = await asyncio.to_thread(
-            recover_publication_manifests, workspace, limit
-        )
+        try:
+            manifests = await asyncio.to_thread(
+                recover_publication_manifests, workspace, limit
+            )
+        except (IncomingFileError, OSError):
+            manifests = ()
         for manifest in manifests:
             try:
                 await self._foundry.freeze_publication_intent(
@@ -270,30 +273,39 @@ class PublicationBridge:
                     continue
                 manifest = by_id.get(publication_id)
                 if manifest is None:
+                    await self._report_source_unavailable(
+                        profile_id, publication_id, revision, lease_token
+                    )
                     continue
-                rows_by_source = _cloud_file_rows(rows, manifest)
-                for source_version_id, local_file in (
-                    (item.source_version_id, item) for item in manifest.files
-                ):
-                    row = rows_by_source[source_version_id]
-                    if row.get("state") == "ready":
-                        continue
-                    content_path = await asyncio.to_thread(
-                        publication_spool_path,
-                        workspace,
-                        publication_id,
-                        local_file.source_version_id,
+                try:
+                    rows_by_source = _cloud_file_rows(rows, manifest)
+                    for source_version_id, local_file in (
+                        (item.source_version_id, item) for item in manifest.files
+                    ):
+                        row = rows_by_source[source_version_id]
+                        if row.get("state") == "ready":
+                            continue
+                        content_path = await asyncio.to_thread(
+                            publication_spool_path,
+                            workspace,
+                            publication_id,
+                            local_file.source_version_id,
+                        )
+                        content = await asyncio.to_thread(content_path.read_bytes)
+                        await self._foundry.upload_publication_file(
+                            profile_id,
+                            publication_id,
+                            _uuid(row.get("id")),
+                            _generation(row.get("generation")),
+                            content,
+                            revision,
+                            lease_token,
+                        )
+                except (IncomingFileError, OSError):
+                    await self._report_source_unavailable(
+                        profile_id, publication_id, revision, lease_token
                     )
-                    content = await asyncio.to_thread(content_path.read_bytes)
-                    await self._foundry.upload_publication_file(
-                        profile_id,
-                        publication_id,
-                        _uuid(row.get("id")),
-                        _generation(row.get("generation")),
-                        content,
-                        revision,
-                        lease_token,
-                    )
+                    continue
                 await self._foundry.publication_retry_result(
                     profile_id, publication_id, revision, lease_token, "submitted"
                 )
@@ -304,6 +316,21 @@ class PublicationBridge:
                     )
             except (FoundryError, IncomingFileError, KeyError, TypeError, ValueError):
                 continue
+
+    async def _report_source_unavailable(
+        self, profile_id: str, publication_id: str, revision: int, lease_token: str
+    ) -> None:
+        try:
+            await self._foundry.publication_retry_result(
+                profile_id,
+                publication_id,
+                revision,
+                lease_token,
+                "failed",
+                "source_unavailable",
+            )
+        except (AttributeError, FoundryError, OSError, TypeError, ValueError):
+            return
 
     async def _handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter

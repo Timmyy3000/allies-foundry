@@ -520,16 +520,25 @@ def _admit_cloud_retry(
             }
         ):
             return False
-        if intent.cloud_revision is not None and revision <= intent.cloud_revision:
-            return (
-                intent.state == PublicationIntentState.REGISTERED
-                and revision == intent.cloud_revision
-            )
+        if intent.cloud_revision is not None and revision < intent.cloud_revision:
+            return False
+        if revision == intent.cloud_revision:
+            if intent.state == PublicationIntentState.REGISTERED:
+                return True
+            if intent.cloud_retry_revision != revision:
+                return False
         intent.state = PublicationIntentState.REGISTERED
         intent.cloud_revision = revision
+        intent.cloud_retry_revision = revision
         intent.safe_error_code = ""
         intent.save(
-            update_fields=["state", "cloud_revision", "safe_error_code", "updated_at"]
+            update_fields=[
+                "state",
+                "cloud_revision",
+                "cloud_retry_revision",
+                "safe_error_code",
+                "updated_at",
+            ]
         )
     return True
 

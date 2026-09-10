@@ -252,15 +252,20 @@ def release_publication_spool(workspace: Path, publication_id: str) -> None:
     volume_root = profile.parent.parent
     spool_root = volume_root / ".allies-publications" / profile.name
     manifest_path = spool_root / f"{publication_id}.json"
-    manifest = _read_publication_manifest(manifest_path, publication_id, None)
-    if manifest is None:
-        return
     directory = spool_root / publication_id
-    if directory.is_symlink() or not directory.is_dir():
+    if (
+        spool_root.is_symlink()
+        or manifest_path.is_symlink()
+        or directory.is_symlink()
+        or manifest_path.exists()
+        and not manifest_path.is_file()
+        or directory.exists()
+        and not directory.is_dir()
+    ):
         raise IncomingFileError("publication spool was unsafe")
-    shutil.rmtree(directory)
-    manifest_path.unlink(missing_ok=True)
-    _sync_directory(spool_root)
+    if not _mark_publication_releasing(volume_root, profile.name, publication_id):
+        return
+    _complete_publication_release(spool_root, publication_id)
     _release_publication(volume_root, publication_id)
 
 
@@ -285,7 +290,10 @@ def recover_publication_manifests(
             publication_id = _command_id(path.stem)
         except IncomingFileError:
             continue
-        manifest = _read_publication_manifest(path, publication_id, None)
+        try:
+            manifest = _read_publication_manifest(path, publication_id, None)
+        except IncomingFileError:
+            continue
         if manifest is not None:
             manifests.append(manifest)
         if len(manifests) == limit:
@@ -322,10 +330,11 @@ def reconcile_publication_spools(volume_root: Path, limit: int = 100) -> int:
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
         raise IncomingFileError("publication reconciliation limit was invalid")
     root = volume_root / ".allies-publications"
+    if root.exists() and (root.is_symlink() or not root.is_dir()):
+        raise IncomingFileError("publication spool was unsafe")
+    _complete_releasing_publications(volume_root, root, limit)
     if not root.exists():
         return 0
-    if root.is_symlink() or not root.is_dir():
-        raise IncomingFileError("publication spool was unsafe")
     discovered: list[tuple[str, PublicationManifest]] = []
     try:
         profiles = sorted(root.iterdir(), key=lambda item: item.name)
@@ -364,6 +373,8 @@ def reconcile_publication_spools(volume_root: Path, limit: int = 100) -> int:
                     "updated_at": int(time.time()),
                 }
                 changed = True
+            elif current["state"] == "releasing":
+                continue
             elif (
                 current["profile"] != profile_key
                 or current["size"] != size
@@ -379,6 +390,62 @@ def reconcile_publication_spools(volume_root: Path, limit: int = 100) -> int:
         if changed:
             _write_ledger(volume_root, records)
     return len(discovered)
+
+
+def _complete_releasing_publications(volume_root: Path, root: Path, limit: int) -> None:
+    with _ledger_lock(volume_root):
+        records = _read_ledger(volume_root)
+        releasing = [
+            (publication_id, str(record["profile"]))
+            for publication_id, record in records.items()
+            if record["state"] == "releasing"
+        ][:limit]
+    completed: list[tuple[str, str]] = []
+    for publication_id, profile_key in releasing:
+        if profile_key in {"", ".", ".."} or "/" in profile_key or "\\" in profile_key:
+            raise IncomingFileError("publication reservation journal was invalid")
+        spool_root = root / profile_key
+        if spool_root.parent != root:
+            raise IncomingFileError("publication reservation journal was invalid")
+        _complete_publication_release(spool_root, publication_id)
+        completed.append((publication_id, profile_key))
+    if not completed:
+        return
+    with _ledger_lock(volume_root):
+        records = _read_ledger(volume_root)
+        changed = False
+        for publication_id, profile_key in completed:
+            record = records.get(publication_id)
+            if (
+                record is not None
+                and record["state"] == "releasing"
+                and record["profile"] == profile_key
+            ):
+                del records[publication_id]
+                changed = True
+        if changed:
+            _write_ledger(volume_root, records)
+
+
+def _complete_publication_release(spool_root: Path, publication_id: str) -> None:
+    if spool_root.exists() and (spool_root.is_symlink() or not spool_root.is_dir()):
+        raise IncomingFileError("publication spool was unsafe")
+    directory = spool_root / publication_id
+    manifest_path = spool_root / f"{publication_id}.json"
+    if (
+        directory.is_symlink()
+        or manifest_path.is_symlink()
+        or directory.exists()
+        and not directory.is_dir()
+        or manifest_path.exists()
+        and not manifest_path.is_file()
+    ):
+        raise IncomingFileError("publication spool was unsafe")
+    if directory.exists():
+        shutil.rmtree(directory)
+    manifest_path.unlink(missing_ok=True)
+    if spool_root.exists():
+        _sync_directory(spool_root)
 
 
 def cleanup_stale_publication_copies(
@@ -1146,7 +1213,7 @@ def _read_ledger(volume_root: Path) -> dict[str, dict[str, object]]:
             or not isinstance(size, int)
             or isinstance(size, bool)
             or size < 0
-            or state not in {"copying", "frozen"}
+            or state not in {"copying", "frozen", "releasing"}
             or not isinstance(updated_at, int)
             or isinstance(updated_at, bool)
             or updated_at < 0
@@ -1219,6 +1286,27 @@ def _mark_publication_frozen(volume_root: Path, publication_id: str) -> None:
         record["state"] = "frozen"
         record["updated_at"] = int(time.time())
         _write_ledger(volume_root, records)
+
+
+def _mark_publication_releasing(
+    volume_root: Path, profile_key: str, publication_id: str
+) -> bool:
+    with _ledger_lock(volume_root):
+        records = _read_ledger(volume_root)
+        record = records.get(publication_id)
+        if record is None:
+            return False
+        if record["profile"] != profile_key or record["state"] not in {
+            "frozen",
+            "releasing",
+        }:
+            raise IncomingFileError("publication reservation was unavailable")
+        if record["state"] == "releasing":
+            return True
+        record["state"] = "releasing"
+        record["updated_at"] = int(time.time())
+        _write_ledger(volume_root, records)
+    return True
 
 
 def _release_publication(volume_root: Path, publication_id: str) -> None:

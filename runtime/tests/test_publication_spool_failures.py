@@ -609,3 +609,91 @@ def test_publication_copy_and_reservation_helpers_fence_unavailable_state(
         files._mark_publication_frozen(tmp_path, str(uuid4()))
     with pytest.raises(IncomingFileError, match="timed out"):
         files._check_deadline(0, lambda: 2, 1)
+
+
+def test_reconciliation_completes_an_interrupted_durable_spool_release(
+    tmp_path, monkeypatch
+):
+    workspace = _workspace(tmp_path)
+    (workspace / "result.csv").write_bytes(b"content")
+    manifest = freeze_publication(workspace, str(uuid4()), ["result.csv"])
+    spool_root = tmp_path / ".allies-publications" / "ally"
+    original = files._complete_publication_release
+
+    def interrupted_release(root, publication_id):
+        files.shutil.rmtree(root / publication_id)
+        raise OSError("process stopped")
+
+    monkeypatch.setattr(files, "_complete_publication_release", interrupted_release)
+    with pytest.raises(OSError, match="process stopped"):
+        release_publication_spool(workspace, manifest.publication_id)
+
+    ledger_path = tmp_path / ".allies-publication-ledger.json"
+    assert json.loads(ledger_path.read_text())["records"][manifest.publication_id][
+        "state"
+    ] == "releasing"
+    assert (spool_root / f"{manifest.publication_id}.json").exists()
+
+    monkeypatch.setattr(files, "_complete_publication_release", original)
+    assert reconcile_publication_spools(tmp_path) == 0
+    assert not (spool_root / manifest.publication_id).exists()
+    assert not (spool_root / f"{manifest.publication_id}.json").exists()
+    assert json.loads(ledger_path.read_text())["records"] == {}
+
+
+def test_reconciliation_releases_a_completed_spool_before_ledger_cleanup(tmp_path):
+    workspace = _workspace(tmp_path)
+    (workspace / "result.csv").write_bytes(b"content")
+    manifest = freeze_publication(workspace, str(uuid4()), ["result.csv"])
+    files._mark_publication_releasing(tmp_path, "ally", manifest.publication_id)
+    files.shutil.rmtree(tmp_path / ".allies-publications")
+
+    assert reconcile_publication_spools(tmp_path) == 0
+    ledger = json.loads((tmp_path / ".allies-publication-ledger.json").read_text())
+    assert ledger["records"] == {}
+
+
+def test_reconciliation_rejects_releasing_ledger_path_escape(tmp_path):
+    files._write_ledger(
+        tmp_path,
+        {
+            str(uuid4()): {
+                "profile": "..",
+                "size": 1,
+                "state": "releasing",
+                "updated_at": 0,
+            }
+        },
+    )
+
+    with pytest.raises(IncomingFileError, match="reservation journal was invalid"):
+        reconcile_publication_spools(tmp_path)
+
+
+def test_reconciliation_rejects_an_unreadable_spool_root(tmp_path, monkeypatch):
+    root = tmp_path / ".allies-publications"
+    root.mkdir()
+    original_iterdir = Path.iterdir
+
+    def unreadable_iterdir(path):
+        if path == root:
+            raise OSError("device unavailable")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", unreadable_iterdir)
+    with pytest.raises(IncomingFileError, match="publication spool was unavailable"):
+        reconcile_publication_spools(tmp_path)
+
+
+def test_reconciliation_skips_an_unreadable_profile_spool(tmp_path, monkeypatch):
+    profile = tmp_path / ".allies-publications" / "ally"
+    profile.mkdir(parents=True)
+    original_glob = Path.glob
+
+    def unreadable_glob(path, pattern):
+        if path == profile:
+            raise OSError("device unavailable")
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", unreadable_glob)
+    assert reconcile_publication_spools(tmp_path) == 0

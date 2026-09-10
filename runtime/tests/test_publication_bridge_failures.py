@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -712,3 +713,73 @@ async def test_recovery_keeps_a_spool_when_a_reclaimed_upload_fails(tmp_path):
     assert publication_spool_path(
         workspace, manifest.publication_id, local.source_version_id
     ).read_bytes() == b"frozen bytes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spool_state", ["missing", "corrupt", "unreadable"])
+async def test_recovery_reports_unavailable_spools_with_the_claim_fence(
+    tmp_path, monkeypatch, spool_state
+):
+    workspace = tmp_path / "profiles" / "ally" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "result.csv").write_bytes(b"frozen bytes")
+    manifest = freeze_publication(workspace, str(uuid4()), ["result.csv"])
+    revision = 7
+    lease_token = str(uuid4())
+    reported = []
+    journal = (
+        tmp_path / ".allies-publications" / "ally" / f"{manifest.publication_id}.json"
+    )
+    if spool_state == "corrupt":
+        journal.write_text("{", encoding="utf-8")
+    elif spool_state == "unreadable":
+        def unreadable_manifest_scan(*_args, **_kwargs):
+            raise OSError("spool unavailable")
+
+        monkeypatch.setattr(
+            bridge_module, "recover_publication_manifests", unreadable_manifest_scan
+        )
+    else:
+        shutil.rmtree(
+            tmp_path / ".allies-publications" / "ally" / manifest.publication_id
+        )
+
+    class Foundry:
+        async def freeze_publication_intent(self, *_args):
+            return {}
+
+        async def claim_publication_retries(self, *_args):
+            return [
+                {
+                    "publication_id": manifest.publication_id,
+                    "revision": revision,
+                    "lease_token": lease_token,
+                    "files": [
+                        {
+                            "id": str(uuid4()),
+                            "source_version_id": manifest.files[0].source_version_id,
+                            "sha256": manifest.files[0].sha256,
+                            "size": manifest.files[0].size,
+                            "generation": 1,
+                            "state": "pending",
+                        }
+                    ],
+                }
+            ]
+
+        async def publication_retry_result(self, *args):
+            reported.append(args)
+            return {}
+
+    bridge = PublicationBridge(Foundry(), _Store(workspace), tmp_path)
+    await bridge.recover(str(uuid4()), "ally")
+
+    assert len(reported) == 1
+    profile_id, publication_id, sent_revision, sent_lease, outcome, error_code = reported[0]
+    assert profile_id and publication_id == manifest.publication_id
+    assert (sent_revision, sent_lease, outcome, error_code) == (
+        revision,
+        lease_token,
+        "failed",
+        "source_unavailable",
+    )

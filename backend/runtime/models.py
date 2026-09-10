@@ -903,6 +903,7 @@ class PublicationIntent(models.Model):
     attempts = models.PositiveSmallIntegerField(default=0)
     safe_error_code = models.CharField(max_length=64, default="", blank=True)
     cloud_revision = models.PositiveBigIntegerField(null=True, blank=True)
+    cloud_retry_revision = models.PositiveBigIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
