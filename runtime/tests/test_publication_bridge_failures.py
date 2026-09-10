@@ -223,6 +223,7 @@ async def test_bridge_sets_the_root_owned_unix_socket_boundary(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_bridge_cancellation_fences_preparation_and_freeze(tmp_path, monkeypatch):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -273,6 +274,7 @@ async def test_bridge_cancellation_fences_preparation_and_freeze(tmp_path, monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_bridge_rejects_invalid_reservations_and_cloud_poll_responses(tmp_path):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -309,6 +311,7 @@ async def test_bridge_rejects_invalid_reservations_and_cloud_poll_responses(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_bridge_fences_claim_loss_after_intent_and_spool_reads(
     tmp_path, monkeypatch
 ):
@@ -418,6 +421,7 @@ async def test_bridge_bounds_pending_cloud_polls_and_invalid_recovery_claims(tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_bridge_fences_snapshot_completion_and_bounds_cloud_timeouts(
     tmp_path, monkeypatch
 ):
