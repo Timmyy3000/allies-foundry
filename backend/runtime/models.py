@@ -860,6 +860,7 @@ class PublicationIntentState(models.TextChoices):
     PREPARING = "preparing", "Preparing"
     FROZEN = "frozen", "Frozen"
     REGISTERED = "registered", "Registered"
+    READY = "ready", "Ready"
     FAILED = "failed", "Failed"
 
 
@@ -943,6 +944,7 @@ class PublicationIntent(models.Model):
                         state__in=[
                             PublicationIntentState.FROZEN,
                             PublicationIntentState.REGISTERED,
+                            PublicationIntentState.READY,
                             PublicationIntentState.FAILED,
                         ],
                         manifest_digest__isnull=False,

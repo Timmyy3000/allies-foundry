@@ -630,6 +630,9 @@ async def test_recovery_reuses_frozen_bytes_after_the_workspace_changes(tmp_path
         async def claim_publication_retries(self, _profile, _limit):
             return []
 
+        async def get_publication(self, *_args):
+            return {"state": "failed"}
+
     bridge = PublicationBridge(Foundry(), ProfileStore(), tmp_path)
     await bridge.recover(str(uuid4()), "ally")
 

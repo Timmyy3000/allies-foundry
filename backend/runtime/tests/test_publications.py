@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -439,7 +440,9 @@ def test_wake_excludes_exhausted_local_intents_and_preserves_unscheduled_cursor(
         2,
         state=PublicationIntentState.REGISTERED,
     )
-    add_intent(second_workspace, second_profile, second_binding, 3)
+    second = add_intent(second_workspace, second_profile, second_binding, 3)
+    second.next_due_at = timezone.now() - timedelta(seconds=1)
+    second.save(update_fields=["next_due_at"])
     captured = []
 
     def cloud_request(_method, path):
@@ -592,3 +595,41 @@ def test_frozen_intent_replays_the_exact_cloud_reservation(
     record = PublicationIntent.objects.get(pk=intent.publication_id)
     assert record.state == PublicationIntentState.REGISTERED
     assert record.cloud_revision == 1
+
+
+@pytest.mark.django_db
+@override_settings(ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED=True)
+@pytest.mark.parametrize("cloud_state", ["ready", "failed"])
+def test_registered_publication_wakes_until_cloud_terminal(
+    publication_claim, monkeypatch, cloud_state
+):
+    context, claim, profile, _execution, _token = publication_claim
+    receipt = create_publication_intent(
+        context,
+        claim.attempt_id,
+        claim.lease_token,
+        "call-registered-recovery",
+        [{"name": "result.csv", "size": 12}],
+    )
+    PublicationIntent.objects.filter(pk=receipt.publication_id).update(
+        state=PublicationIntentState.REGISTERED,
+        manifest_digest="a" * 64,
+        cloud_revision=1,
+        attempts=5,
+    )
+
+    def cloud(method, path):
+        if "due-bindings" in path:
+            return 200, {"binding_ids": []}
+        return 200, {"state": cloud_state, "revision": 1}
+
+    monkeypatch.setattr(publication_service, "cloud_publication_request", cloud)
+    assert wake_due_publications(limit=20).woken == 1
+    assert wake_due_publications(limit=20).woken == 0
+    publication_service.get_publication(context, profile.id, receipt.publication_id)
+    assert PublicationIntent.objects.get(pk=receipt.publication_id).state == cloud_state
+    PublicationIntent.objects.filter(pk=receipt.publication_id).update(
+        next_due_at=timezone.now()
+    )
+    assert wake_due_publications(limit=20).woken == 0
+    assert Execution.objects.count() == 1

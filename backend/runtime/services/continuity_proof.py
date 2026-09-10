@@ -1329,7 +1329,7 @@ def _runtime_proof_command(
         + " /run/secrets/openai-api-key"
         + " /run/secrets/foundry-runtime-token"
         + "; attempts=0"
-        + '; while [ "$(stat -c %u /opt/data)" != 10000 ]; do '
+        + '; while [ "$(stat -c %u:%a /opt/data)" != 0:1777 ]; do '
         + "attempts=$((attempts + 1)); "
         + '[ "$attempts" -lt 60 ] || exit 1; sleep 1; done'
         + "; exec setpriv --reuid=10000 --regid=10000 --clear-groups"

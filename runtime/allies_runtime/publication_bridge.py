@@ -292,12 +292,28 @@ class PublicationBridge:
             )
         except (IncomingFileError, OSError):
             manifests = ()
+        released = set()
         for manifest in manifests:
             try:
                 await self._foundry.freeze_publication_intent(
                     profile_id, manifest.publication_id, manifest.frozen_files()
                 )
-            except (FoundryError, ValueError):
+                view = await self._foundry.get_publication(
+                    profile_id, manifest.publication_id
+                )
+                if _ready_view(view, manifest.publication_id).get("state") == "ready":
+                    await asyncio.to_thread(
+                        release_publication_spool, workspace, manifest.publication_id
+                    )
+                    released.add(manifest.publication_id)
+                elif view.get("revision") == 1 and view.get("state") in {
+                    "uploading",
+                    "validating",
+                }:
+                    await self._upload_frozen_files(
+                        profile_id, workspace, manifest, view.get("files"), 1
+                    )
+            except (FoundryError, IncomingFileError, OSError, TypeError, ValueError):
                 continue
         try:
             claims = await self._foundry.claim_publication_retries(profile_id, limit)
@@ -309,6 +325,8 @@ class PublicationBridge:
                 continue
             try:
                 publication_id = _uuid(claim.get("publication_id"))
+                if publication_id in released:
+                    continue
                 revision = claim.get("revision")
                 lease_token = _uuid(claim.get("lease_token"))
                 rows = claim.get("files")
@@ -325,31 +343,9 @@ class PublicationBridge:
                     )
                     continue
                 try:
-                    rows_by_source = _cloud_file_rows(rows, manifest)
-                    for source_version_id, local_file in (
-                        (item.source_version_id, item) for item in manifest.files
-                    ):
-                        row = rows_by_source[source_version_id]
-                        if row.get("state") == "ready":
-                            continue
-                        content_path = await asyncio.to_thread(
-                            publication_spool_path,
-                            workspace,
-                            publication_id,
-                            local_file.source_version_id,
-                        )
-                        content = await asyncio.to_thread(content_path.read_bytes)
-                        if hashlib.sha256(content).hexdigest() != local_file.sha256:
-                            raise IncomingFileError("publication source digest changed")
-                        await self._foundry.upload_publication_file(
-                            profile_id,
-                            publication_id,
-                            _uuid(row.get("id")),
-                            _generation(row.get("generation")),
-                            content,
-                            revision,
-                            lease_token,
-                        )
+                    await self._upload_frozen_files(
+                        profile_id, workspace, manifest, rows, revision, lease_token
+                    )
                 except (IncomingFileError, OSError):
                     await self._report_source_unavailable(
                         profile_id, publication_id, revision, lease_token
@@ -365,6 +361,33 @@ class PublicationBridge:
                     )
             except (FoundryError, IncomingFileError, KeyError, TypeError, ValueError):
                 continue
+
+    async def _upload_frozen_files(
+        self, profile_id, workspace, manifest, rows, revision, lease_token=None
+    ) -> None:
+        rows_by_source = _cloud_file_rows(rows, manifest)
+        for local_file in manifest.files:
+            row = rows_by_source[local_file.source_version_id]
+            if row.get("state") in {"ready", "validating"}:
+                continue
+            content_path = await asyncio.to_thread(
+                publication_spool_path,
+                workspace,
+                manifest.publication_id,
+                local_file.source_version_id,
+            )
+            content = await asyncio.to_thread(content_path.read_bytes)
+            if hashlib.sha256(content).hexdigest() != local_file.sha256:
+                raise IncomingFileError("publication source digest changed")
+            await self._foundry.upload_publication_file(
+                profile_id,
+                manifest.publication_id,
+                _uuid(row.get("id")),
+                _generation(row.get("generation")),
+                content,
+                revision,
+                lease_token,
+            )
 
     async def _report_source_unavailable(
         self, profile_id: str, publication_id: str, revision: int, lease_token: str

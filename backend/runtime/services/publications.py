@@ -15,7 +15,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import Min
+from django.db.models import Min, Q
 from django.utils import timezone
 
 from runtime.exceptions import (
@@ -193,11 +193,18 @@ def wake_due_publications(
     observed = timezone.now()
     workspace_ids = list(
         PublicationIntent.objects.filter(
-            state__in=[PublicationIntentState.FROZEN, PublicationIntentState.FAILED],
+            state__in=[
+                PublicationIntentState.FROZEN,
+                PublicationIntentState.REGISTERED,
+                PublicationIntentState.FAILED,
+            ],
             manifest_digest__isnull=False,
             next_due_at__lte=observed,
-            attempts__lt=MAX_PUBLICATION_ATTEMPTS,
             profile__lifecycle_state=RuntimeProfileLifecycleState.ACTIVE,
+        )
+        .filter(
+            Q(state=PublicationIntentState.REGISTERED)
+            | Q(attempts__lt=MAX_PUBLICATION_ATTEMPTS)
         )
         .values("workspace_id")
         .annotate(next_due_at=Min("next_due_at"))
@@ -263,6 +270,11 @@ def _wake_publication_workspaces(workspace_ids: Sequence[UUID]) -> int:
             if workspace is None:
                 continue
             request_execution_wake_locked(workspace)
+            PublicationIntent.objects.filter(
+                workspace=workspace,
+                state=PublicationIntentState.REGISTERED,
+                next_due_at__lte=timezone.now(),
+            ).update(next_due_at=timezone.now() + timedelta(seconds=60))
             woken += 1
     return woken
 
@@ -350,6 +362,7 @@ def register_publication(
         if intent.state not in {
             PublicationIntentState.FROZEN,
             PublicationIntentState.REGISTERED,
+            PublicationIntentState.READY,
             PublicationIntentState.FAILED,
         }:
             raise RuntimeLeaseConflictError("publication intent is not frozen")
@@ -435,7 +448,21 @@ def get_publication(
     with transaction.atomic():
         _current_profile(context, profile_id)
         _locked_intent(context, profile_id, publication_id)
-    return cloud_publication_request("GET", f"/file-publications/{publication_id}")
+    status, payload = cloud_publication_request(
+        "GET", f"/file-publications/{publication_id}"
+    )
+    if 200 <= status < 300 and payload.get("state") in {"ready", "failed"}:
+        with transaction.atomic():
+            _current_profile(context, profile_id)
+            intent = _locked_intent(context, profile_id, publication_id)
+            if payload.get("revision") == intent.cloud_revision:
+                if payload["state"] == "ready":
+                    intent.state = PublicationIntentState.READY
+                elif intent.state != PublicationIntentState.READY:
+                    intent.state = PublicationIntentState.FAILED
+                    intent.attempts = MAX_PUBLICATION_ATTEMPTS
+                intent.save(update_fields=["state", "attempts", "updated_at"])
+    return status, payload
 
 
 def claim_publication_retries(
@@ -589,7 +616,11 @@ def _set_registered(publication_id: UUID, revision: object) -> None:
             .filter(pk=publication_id)
             .first()
         )
-        if intent is None or intent.manifest_digest is None:
+        if (
+            intent is None
+            or intent.manifest_digest is None
+            or intent.state == PublicationIntentState.READY
+        ):
             return
         if (
             isinstance(revision, int)
@@ -667,7 +698,11 @@ def _set_publication_failure(
             .filter(pk=publication_id)
             .first()
         )
-        if intent is None or intent.manifest_digest is None:
+        if (
+            intent is None
+            or intent.manifest_digest is None
+            or intent.state == PublicationIntentState.READY
+        ):
             return
         if (
             revision is not None

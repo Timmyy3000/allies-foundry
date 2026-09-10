@@ -785,6 +785,9 @@ async def test_recovery_retains_spools_for_failed_acknowledgements_and_claims(tm
         async def claim_publication_retries(self, *_args):
             raise FoundryError("claim failed")
 
+        async def get_publication(self, *_args):
+            return {"state": "failed"}
+
     bridge = PublicationBridge(Foundry(), _Store(workspace), tmp_path)
     await bridge.recover(str(uuid4()), "ally")
 
@@ -839,6 +842,8 @@ async def test_recovery_releases_a_spool_only_after_a_ready_cloud_receipt(tmp_pa
             return {}
 
         async def get_publication(self, *_args):
+            if not uploads:
+                return {"state": "retry_pending", "revision": 2}
             return {
                 "state": "ready",
                 "files": [{"name": "result.csv", "open_path": "/ready/result.csv"}],
@@ -888,6 +893,9 @@ async def test_recovery_keeps_a_spool_when_a_reclaimed_upload_fails(tmp_path):
 
         async def upload_publication_file(self, *_args):
             raise FoundryError("retry upload failed")
+
+        async def get_publication(self, *_args):
+            return {"state": "failed"}
 
     bridge = PublicationBridge(Foundry(), _Store(workspace), tmp_path)
     await bridge.recover(str(uuid4()), "ally")
@@ -969,6 +977,9 @@ async def test_recovery_reports_unavailable_spools_with_the_claim_fence(
         async def upload_publication_file(self, *_args):
             pytest.fail("unavailable source bytes must not be uploaded")
 
+        async def get_publication(self, *_args):
+            return {"state": "failed"}
+
     bridge = PublicationBridge(Foundry(), _Store(workspace), tmp_path)
     await bridge.recover(str(uuid4()), "ally")
 
@@ -983,3 +994,60 @@ async def test_recovery_reports_unavailable_spools_with_the_claim_fence(
         "failed",
         "source_unavailable",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_state", ["uploading", "ready"])
+@pytest.mark.usefixtures("root_owned_publication_spool")
+async def test_restart_reconciles_registered_publication_without_retry_claim(
+    tmp_path, initial_state
+):
+    workspace = tmp_path / "profiles" / "ally" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "result.csv").write_bytes(b"frozen bytes")
+    manifest = freeze_publication(workspace, str(uuid4()), ["result.csv"])
+    (workspace / "result.csv").write_bytes(b"changed work")
+    local = manifest.files[0]
+    uploads = []
+
+    class Foundry:
+        state = initial_state
+
+        async def freeze_publication_intent(self, *_args):
+            return {}
+
+        async def claim_publication_retries(self, *_args):
+            return []
+
+        async def get_publication(self, *_args):
+            return {
+                "state": self.state,
+                "revision": 1,
+                "files": [
+                    {
+                        "id": str(uuid4()),
+                        "source_version_id": local.source_version_id,
+                        "name": "result.csv",
+                        "size": local.size,
+                        "sha256": local.sha256,
+                        "generation": 1,
+                        "state": "ready" if self.state == "ready" else "pending",
+                        "open_path": "/files/result",
+                    }
+                ],
+            }
+
+        async def upload_publication_file(self, *args):
+            uploads.append(args[4])
+            assert args[5:] == (1, None)
+            self.state = "ready"
+            return {}
+
+    bridge = PublicationBridge(Foundry(), _Store(workspace), tmp_path)
+    await bridge.recover(str(uuid4()), "ally")
+    await bridge.recover(str(uuid4()), "ally")
+    assert uploads == ([b"frozen bytes"] if initial_state == "uploading" else [])
+    with pytest.raises(IncomingFileError, match="snapshot was unavailable"):
+        publication_spool_path(
+            workspace, manifest.publication_id, local.source_version_id
+        )
