@@ -15,6 +15,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import Min
 from django.utils import timezone
 
 from runtime.exceptions import (
@@ -195,11 +196,13 @@ def wake_due_publications(
             state__in=[PublicationIntentState.FROZEN, PublicationIntentState.FAILED],
             manifest_digest__isnull=False,
             next_due_at__lte=observed,
+            attempts__lt=MAX_PUBLICATION_ATTEMPTS,
             profile__lifecycle_state=RuntimeProfileLifecycleState.ACTIVE,
         )
+        .values("workspace_id")
+        .annotate(next_due_at=Min("next_due_at"))
         .order_by("next_due_at", "workspace_id")
-        .values_list("workspace_id", flat=True)
-        .distinct()[:limit]
+        .values_list("workspace_id", flat=True)[:limit]
     )
     query = urlencode({"limit": limit, **({"cursor": cursor} if cursor else {})})
     try:
@@ -213,26 +216,39 @@ def wake_due_publications(
     if not isinstance(binding_ids, list) or len(binding_ids) > limit:
         binding_ids = []
     bindings: list[UUID] = []
+    seen_bindings: set[UUID] = set()
     for binding_id in binding_ids:
         try:
-            bindings.append(UUID(str(binding_id)))
+            parsed = UUID(str(binding_id))
         except (TypeError, ValueError):
             continue
-    remaining = max(0, limit - len(workspace_ids))
-    if remaining:
-        workspace_ids.extend(
+        if parsed not in seen_bindings:
+            bindings.append(parsed)
+            seen_bindings.add(parsed)
+    cloud_workspaces: list[UUID] = []
+    for binding_id in bindings:
+        workspace_id = (
             PublicationIntent.objects.filter(
-                cloud_binding_id__in=bindings,
+                cloud_binding_id=binding_id,
+                manifest_digest__isnull=False,
+                state__in=[
+                    PublicationIntentState.FROZEN,
+                    PublicationIntentState.REGISTERED,
+                    PublicationIntentState.FAILED,
+                ],
                 profile__lifecycle_state=RuntimeProfileLifecycleState.ACTIVE,
             )
-            .order_by("workspace_id")
+            .order_by("-updated_at", "workspace_id")
             .values_list("workspace_id", flat=True)
-            .distinct()[:remaining]
+            .first()
         )
+        if workspace_id is not None:
+            cloud_workspaces.append(workspace_id)
+    scheduled = list(dict.fromkeys([*workspace_ids, *cloud_workspaces]))[:limit]
     rendered_cursor = next_cursor if isinstance(next_cursor, str) else None
-    return PublicationWakePage(
-        _wake_publication_workspaces(workspace_ids), rendered_cursor
-    )
+    if any(workspace_id not in scheduled for workspace_id in cloud_workspaces):
+        rendered_cursor = cursor
+    return PublicationWakePage(_wake_publication_workspaces(scheduled), rendered_cursor)
 
 
 def _wake_publication_workspaces(workspace_ids: Sequence[UUID]) -> int:
@@ -385,7 +401,10 @@ def upload_publication_file(
     with transaction.atomic():
         _current_profile(context, profile_id)
         intent = _locked_intent(context, profile_id, publication_id)
-        if intent.state != PublicationIntentState.REGISTERED:
+        if (
+            intent.state != PublicationIntentState.REGISTERED
+            or intent.cloud_revision != revision
+        ):
             raise RuntimeLeaseConflictError("publication is not registered")
     headers = {
         "Content-Type": "application/octet-stream",
@@ -404,6 +423,7 @@ def upload_publication_file(
         _set_publication_failure(
             publication_id,
             str(payload.get("error_code") or "publication_unavailable"),
+            revision=revision,
         )
         _project_publication_failure(publication_id)
     return status, payload
@@ -456,8 +476,62 @@ def claim_publication_retries(
         claimed = payload.get("items")
         if not isinstance(claimed, list):
             raise RuntimeValidationError("publication retry response was invalid")
-        items.extend(item for item in claimed if isinstance(item, dict))
+        for item in claimed:
+            if not isinstance(item, dict):
+                continue
+            if _admit_cloud_retry(context, profile_id, binding_id, item):
+                items.append(item)
     return tuple(items[:limit])
+
+
+def _admit_cloud_retry(
+    context: RuntimeContext,
+    profile_id: UUID,
+    binding_id: UUID,
+    item: Mapping[str, object],
+) -> bool:
+    try:
+        publication_id = UUID(str(item.get("publication_id")))
+    except (TypeError, ValueError):
+        return False
+    revision = item.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        return False
+    with transaction.atomic():
+        _current_profile(context, profile_id)
+        intent = (
+            PublicationIntent.objects.select_for_update()
+            .filter(
+                pk=publication_id,
+                profile_id=profile_id,
+                workspace_id=context.workspace_id,
+            )
+            .first()
+        )
+        if (
+            intent is None
+            or intent.manifest_digest is None
+            or intent.cloud_binding_id != binding_id
+            or intent.state
+            not in {
+                PublicationIntentState.FROZEN,
+                PublicationIntentState.REGISTERED,
+                PublicationIntentState.FAILED,
+            }
+        ):
+            return False
+        if intent.cloud_revision is not None and revision <= intent.cloud_revision:
+            return (
+                intent.state == PublicationIntentState.REGISTERED
+                and revision == intent.cloud_revision
+            )
+        intent.state = PublicationIntentState.REGISTERED
+        intent.cloud_revision = revision
+        intent.safe_error_code = ""
+        intent.save(
+            update_fields=["state", "cloud_revision", "safe_error_code", "updated_at"]
+        )
+    return True
 
 
 def record_publication_retry(
@@ -477,7 +551,9 @@ def record_publication_retry(
         raise RuntimeValidationError("publication error code is invalid")
     with transaction.atomic():
         _current_profile(context, profile_id)
-        _locked_intent(context, profile_id, publication_id)
+        intent = _locked_intent(context, profile_id, publication_id)
+        if intent.cloud_revision != revision:
+            raise RuntimeLeaseConflictError("publication retry revision is stale")
     body: dict[str, object] = {
         "revision": revision,
         "lease_token": str(lease_token),
@@ -485,9 +561,16 @@ def record_publication_retry(
     }
     if safe_error_code is not None:
         body["safe_error_code"] = safe_error_code
-    return cloud_publication_request(
+    status, payload = cloud_publication_request(
         "POST", f"/file-publications/{publication_id}/retry-result", body=body
     )
+    if outcome == "failed" and 200 <= status < 300:
+        _set_publication_failure(
+            publication_id,
+            safe_error_code or "publication_unavailable",
+            revision=revision,
+        )
+    return status, payload
 
 
 def _set_registered(publication_id: UUID, revision: object) -> None:
@@ -564,7 +647,9 @@ def _project_publication_failure(publication_id: UUID) -> None:
         return
 
 
-def _set_publication_failure(publication_id: UUID, error_code: str) -> None:
+def _set_publication_failure(
+    publication_id: UUID, error_code: str, *, revision: int | None = None
+) -> None:
     if not _SAFE_ERROR.fullmatch(error_code):
         error_code = "publication_unavailable"
     with transaction.atomic():
@@ -573,11 +658,18 @@ def _set_publication_failure(publication_id: UUID, error_code: str) -> None:
             .filter(pk=publication_id)
             .first()
         )
+        if intent is None or intent.manifest_digest is None:
+            return
         if (
-            intent is None
-            or intent.manifest_digest is None
-            or intent.attempts >= MAX_PUBLICATION_ATTEMPTS
+            revision is not None
+            and intent.state == PublicationIntentState.FAILED
+            and intent.cloud_revision == revision
         ):
+            return
+        if intent.attempts >= MAX_PUBLICATION_ATTEMPTS:
+            intent.state = PublicationIntentState.FAILED
+            intent.safe_error_code = error_code
+            intent.save(update_fields=["state", "safe_error_code", "updated_at"])
             return
         intent.attempts += 1
         intent.state = PublicationIntentState.FAILED

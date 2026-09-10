@@ -11,6 +11,7 @@ from runtime.exceptions import (
     RuntimeLeaseConflictError,
 )
 from runtime.models import (
+    Attempt,
     Execution,
     PublicationIntent,
     PublicationIntentState,
@@ -23,8 +24,11 @@ from runtime.services import publications as publication_service
 from runtime.services.claims import claim_next_execution
 from runtime.services.publications import (
     acknowledge_frozen_publication,
+    claim_publication_retries,
     create_publication_intent,
+    record_publication_retry,
     register_publication,
+    upload_publication_file,
     wake_due_publications,
 )
 from runtime.services.runtime_auth import (
@@ -204,6 +208,220 @@ def test_due_publication_wake_uses_existing_workspace_operation_without_an_execu
     assert page.woken == 1
     assert page.next_cursor == "next-page"
     assert Execution.objects.count() == 1
+
+
+@pytest.mark.django_db
+@override_settings(ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED=True)
+def test_newer_cloud_retry_reopens_an_exhausted_frozen_manifest(
+    publication_claim, monkeypatch
+):
+    context, claim, profile, _execution, _token = publication_claim
+    frozen_files = [
+        {
+            "source_version_id": str(uuid4()),
+            "name": "result.csv",
+            "size": 12,
+            "sha256": "a" * 64,
+        }
+    ]
+    receipt = create_publication_intent(
+        context,
+        claim.attempt_id,
+        claim.lease_token,
+        "call-retry",
+        [{"name": "result.csv", "size": 12}],
+    )
+    acknowledge_frozen_publication(
+        context, profile.id, receipt.publication_id, frozen_files
+    )
+    intent = PublicationIntent.objects.get(pk=receipt.publication_id)
+    digest = intent.manifest_digest
+    intent.state = PublicationIntentState.FAILED
+    intent.attempts = PublicationIntent.MAX_ATTEMPTS
+    intent.cloud_revision = 1
+    intent.safe_error_code = "publication_unavailable"
+    intent.save()
+    claimed_revision = 2
+    uploaded = []
+
+    def cloud_request(method, path, **_kwargs):
+        if path == "/file-publication-retries/claim":
+            return 200, {
+                "items": [
+                    {
+                        "publication_id": str(intent.id),
+                        "revision": claimed_revision,
+                    }
+                ]
+            }
+        if method == "PUT":
+            uploaded.append(path)
+            return 202, {}
+        if path.endswith("/retry-result"):
+            return 200, {}
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(publication_service, "cloud_publication_request", cloud_request)
+
+    assert claim_publication_retries(context, profile.id, 20)[0]["revision"] == 2
+    upload_publication_file(
+        context,
+        profile.id,
+        intent.id,
+        uuid4(),
+        1,
+        b"frozen bytes",
+        2,
+        uuid4(),
+    )
+    record_publication_retry(
+        context, profile.id, intent.id, 2, uuid4(), "failed", "source_unavailable"
+    )
+
+    intent.refresh_from_db()
+    assert uploaded and intent.state == PublicationIntentState.FAILED
+    assert intent.attempts == PublicationIntent.MAX_ATTEMPTS
+    assert intent.manifest_digest == digest
+    assert intent.cloud_revision == 2
+    assert claim_publication_retries(context, profile.id, 20) == ()
+
+    claimed_revision = 3
+    assert claim_publication_retries(context, profile.id, 20)[0]["revision"] == 3
+    intent.refresh_from_db()
+    assert intent.state == PublicationIntentState.REGISTERED
+    assert intent.attempts == PublicationIntent.MAX_ATTEMPTS
+    assert intent.manifest_digest == digest
+
+
+@pytest.mark.django_db
+@override_settings(
+    ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED=True,
+    ALLIES_CLOUD_URL="https://cloud.example.test",
+    ALLIES_CLOUD_EVENT_SERVICE_TOKEN="foundry-event-token",
+)
+def test_wake_excludes_exhausted_local_intents_and_preserves_unscheduled_cursor(
+    publication_claim, monkeypatch
+):
+    _context, claim, profile, execution, _token = publication_claim
+
+    def make_workspace(key):
+        workspace = Workspace.objects.create(
+            tenant_ref=str(uuid4()),
+            fly_app_ref=f"app-{key}",
+            volume_ref=f"volume-{key}",
+            machine_ref=f"machine-{key}",
+            machine_generation=1,
+            provisioning_phase=WorkspaceProvisioningPhase.IDLE,
+            ready_generation=1,
+            ready_start_epoch=0,
+            ready_boot_id=uuid4(),
+            runtime_last_seen_at=timezone.now(),
+        )
+        runtime_profile = RuntimeProfile.objects.create(
+            workspace=workspace,
+            ally_ref=f"ally-{key}",
+            hermes_profile_key=f"ally-{key}",
+            lifecycle_state=RuntimeProfileLifecycleState.ACTIVE,
+            materialized_generation=1,
+            seed_payload={"model": "gpt-5.6-luna"},
+        )
+        return workspace, runtime_profile
+
+    def add_intent(
+        workspace,
+        runtime_profile,
+        binding,
+        key,
+        *,
+        attempts=0,
+        state=PublicationIntentState.FAILED,
+    ):
+        item_execution = Execution.objects.create(
+            workspace=workspace,
+            profile=runtime_profile,
+            idempotency_key=f"publication-{key}",
+            source_kind="conversation_message",
+            cloud_binding_id=binding,
+            cloud_message_id=uuid4(),
+            input_payload={"message": "publish"},
+        )
+        item_attempt = Attempt.objects.create(
+            execution=item_execution, number=1, machine_generation=1
+        )
+        return PublicationIntent.objects.create(
+            workspace=workspace,
+            profile=runtime_profile,
+            execution=item_execution,
+            source_attempt=item_attempt,
+            cloud_binding_id=binding,
+            cloud_message_id=item_execution.cloud_message_id,
+            tool_call_digest=f"{key:064x}",
+            request_digest=f"{key + 10:064x}",
+            manifest_digest="a" * 64,
+            state=state,
+            attempts=attempts,
+            next_due_at=timezone.now(),
+        )
+
+    exhausted = PublicationIntent.objects.create(
+        workspace=execution.workspace,
+        profile=profile,
+        execution=execution,
+        source_attempt_id=claim.attempt_id,
+        cloud_binding_id=execution.cloud_binding_id,
+        cloud_message_id=execution.cloud_message_id,
+        tool_call_digest="b" * 64,
+        request_digest="c" * 64,
+        manifest_digest="a" * 64,
+        state=PublicationIntentState.FAILED,
+        attempts=PublicationIntent.MAX_ATTEMPTS,
+        next_due_at=timezone.now(),
+    )
+    first_workspace, first_profile = make_workspace(1)
+    second_workspace, second_profile = make_workspace(2)
+    first_binding, duplicate_binding, second_binding = uuid4(), uuid4(), uuid4()
+    add_intent(
+        first_workspace,
+        first_profile,
+        first_binding,
+        1,
+        state=PublicationIntentState.REGISTERED,
+    )
+    add_intent(
+        first_workspace,
+        first_profile,
+        duplicate_binding,
+        2,
+        state=PublicationIntentState.REGISTERED,
+    )
+    add_intent(second_workspace, second_profile, second_binding, 3)
+    captured = []
+
+    def cloud_request(_method, path):
+        binding_ids = [str(first_binding)]
+        if "limit=2" in path:
+            binding_ids.append(str(duplicate_binding))
+        return 200, {"binding_ids": binding_ids, "next_cursor": "advanced"}
+
+    monkeypatch.setattr(publication_service, "cloud_publication_request", cloud_request)
+    monkeypatch.setattr(
+        publication_service,
+        "_wake_publication_workspaces",
+        lambda workspace_ids: (
+            captured.append(tuple(workspace_ids)) or len(workspace_ids)
+        ),
+    )
+
+    page = wake_due_publications(limit=2, cursor="keep")
+
+    assert exhausted.attempts == PublicationIntent.MAX_ATTEMPTS
+    assert captured == [(second_workspace.id, first_workspace.id)]
+    assert page.woken == 2 and page.next_cursor == "advanced"
+
+    page = wake_due_publications(limit=1, cursor="keep")
+
+    assert captured[-1] == (second_workspace.id,)
+    assert page.next_cursor == "keep"
 
 
 class _CloudResponse:
