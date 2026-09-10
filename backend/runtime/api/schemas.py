@@ -35,6 +35,9 @@ __all__ = [
     "ProfileProvisioningRequest",
     "PublicationFrozenRequest",
     "PublicationIntentRequest",
+    "PublicationRegisterRequest",
+    "PublicationRetryClaimRequest",
+    "PublicationRetryResultRequest",
     "ReconciliationReceipt",
     "RoutineSessionBindingRequest",
     "RuntimeActivityWaitReceipt",
@@ -83,6 +86,29 @@ class PublicationFrozenRequest(Schema):
     model_config = ConfigDict(extra="forbid")
 
     files: list[PublicationFrozenFile] = Field(..., min_length=1, max_length=10)
+
+
+class PublicationRegisterRequest(PublicationFrozenRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    publication_id: UUID
+
+
+class PublicationRetryClaimRequest(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: StrictInt = Field(..., ge=1, le=20)
+
+
+class PublicationRetryResultRequest(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    revision: StrictInt = Field(..., ge=1)
+    lease_token: UUID
+    outcome: Literal["submitted", "failed"]
+    safe_error_code: StrictStr | None = Field(
+        default=None, min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
 
 
 class RuntimeIntentRequest(Schema):

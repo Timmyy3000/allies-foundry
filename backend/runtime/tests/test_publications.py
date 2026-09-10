@@ -6,6 +6,7 @@ import pytest
 from django.test import override_settings
 from django.utils import timezone
 
+from runtime.exceptions import RuntimeIdempotencyConflictError
 from runtime.models import (
     Execution,
     PublicationIntent,
@@ -15,6 +16,7 @@ from runtime.models import (
     Workspace,
     WorkspaceProvisioningPhase,
 )
+from runtime.services import publications as publication_service
 from runtime.services.claims import claim_next_execution
 from runtime.services.publications import (
     acknowledge_frozen_publication,
@@ -106,7 +108,7 @@ def test_intent_precedes_and_fences_the_frozen_manifest(publication_claim):
     assert frozen.state == PublicationIntentState.FROZEN
     assert frozen.manifest_digest
 
-    with pytest.raises(Exception, match="manifest changed"):
+    with pytest.raises(RuntimeIdempotencyConflictError, match="manifest changed"):
         acknowledge_frozen_publication(
             context,
             profile.id,
@@ -156,3 +158,105 @@ def test_intent_api_replays_the_same_tool_identity(publication_claim, client):
     )
     assert frozen.status_code == 200
     assert frozen.json()["state"] == "frozen"
+
+
+class _CloudResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    def read(self, _limit):
+        return self._body
+
+    def close(self):
+        return None
+
+
+@pytest.mark.django_db
+@override_settings(
+    ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED=True,
+    ALLIES_CLOUD_URL="https://cloud.example.test",
+    ALLIES_CLOUD_EVENT_SERVICE_TOKEN="foundry-event-token",
+)
+def test_frozen_intent_replays_the_exact_cloud_reservation(publication_claim, monkeypatch):
+    context, claim, profile, _execution, _token = publication_claim
+    requests = []
+
+    class Opener:
+        def open(self, request, timeout):
+            requests.append((request, timeout))
+            if len(requests) == 1:
+                return _CloudResponse(
+                    503,
+                    b'{"status":"error","data":{"code":"publication_unavailable"}}',
+                )
+            return _CloudResponse(
+                202,
+                b'{"status":"success","message":"accepted","data":'
+                b'{"publication_id":"00000000-0000-0000-0000-000000000000",'
+                b'"state":"uploading","revision":1,"files":[]}}',
+            )
+
+    monkeypatch.setattr(publication_service, "build_opener", lambda _handler: Opener())
+    intent = create_publication_intent(
+        context,
+        claim.attempt_id,
+        claim.lease_token,
+        "tool-call-1",
+        [{"name": "result.csv", "size": 12}],
+    )
+    frozen_files = [
+        {
+            "source_version_id": str(uuid4()),
+            "name": "result.csv",
+            "size": 12,
+            "sha256": "a" * 64,
+        }
+    ]
+
+    acknowledge_frozen_publication(
+        context, profile.id, intent.publication_id, frozen_files
+    )
+    acknowledge_frozen_publication(
+        context, profile.id, intent.publication_id, frozen_files
+    )
+
+    assert len(requests) == 3
+    request, timeout = requests[0]
+    assert timeout == 120
+    assert request.full_url == (
+        "https://cloud.example.test/api/v1/internal/v1/file-publications"
+    )
+    assert request.get_header("Authorization") == "Bearer foundry-event-token"
+    assert request.get_header("Idempotency-key") == str(intent.publication_id)
+    assert request.data == (
+        b'{"binding_id":"'
+        + str(PublicationIntent.objects.get(pk=intent.publication_id).cloud_binding_id).encode()
+        + b'","files":[{"name":"result.csv","sha256":"'
+        + b"a" * 64
+        + b'","size":12,"source_version_id":"'
+        + frozen_files[0]["source_version_id"].encode()
+        + b'"}],"message_id":"'
+        + str(PublicationIntent.objects.get(pk=intent.publication_id).cloud_message_id).encode()
+        + b'","publication_id":"'
+        + str(intent.publication_id).encode()
+        + b'"}'
+    )
+    failure_request, failure_timeout = requests[1]
+    assert failure_timeout == 120
+    assert failure_request.full_url == (
+        "https://cloud.example.test/api/v1/internal/v1/file-publication-status"
+    )
+    assert failure_request.get_header("Authorization") == "Bearer foundry-event-token"
+    assert failure_request.data == (
+        b'{"binding_id":"'
+        + str(PublicationIntent.objects.get(pk=intent.publication_id).cloud_binding_id).encode()
+        + b'","error_code":"publication_unavailable","message_id":"'
+        + str(PublicationIntent.objects.get(pk=intent.publication_id).cloud_message_id).encode()
+        + b'","publication_id":"'
+        + str(intent.publication_id).encode()
+        + b'","state":"failed"}'
+    )
+    record = PublicationIntent.objects.get(pk=intent.publication_id)
+    assert record.state == PublicationIntentState.REGISTERED
+    assert record.cloud_revision == 1

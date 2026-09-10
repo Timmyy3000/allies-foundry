@@ -7,14 +7,21 @@ import json
 import os
 import shutil
 import stat
+import threading
 import time
 import unicodedata
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from .errors import IncomingFileError
+
+try:  # pragma: no cover - runtime images use Linux advisory locks
+    import fcntl
+except ImportError:  # pragma: no cover - Windows uses the in-process fallback
+    fcntl = None
 
 MAX_FILES = 10
 MAX_FILE_BYTES = 25_000_000
@@ -31,6 +38,8 @@ MAX_VOLUME_PUBLICATION_BYTES = 250_000_000
 MIN_VOLUME_FREE_BYTES = 250_000_000
 _PUBLICATION_SCHEMA = "allies.publication.v1"
 _RECEIPT_SCHEMA = "allies.incoming-files.v1"
+_publication_locks: dict[str, threading.Lock] = {}
+_publication_locks_guard = threading.Lock()
 _WINDOWS_RESERVED_NAMES = frozenset(
     {
         "CON",
@@ -114,6 +123,35 @@ class PublicationManifest:
 FileFetcher = Callable[[IncomingFile], AsyncIterator[bytes]]
 
 
+def prepare_publication_files(
+    workspace: Path, paths: Sequence[str]
+) -> list[dict[str, object]]:
+    """Read bounded descriptors before the publication intent is persisted."""
+
+    workspace = _workspace(workspace)
+    source_paths = _publication_paths(paths)
+    prepared: list[dict[str, object]] = []
+    total = 0
+    for relative in source_paths:
+        source = workspace / relative
+        try:
+            metadata = source.lstat()
+        except OSError:
+            raise IncomingFileError("publication source was unavailable") from None
+        if (
+            source.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or not 1 <= metadata.st_size <= MAX_PUBLICATION_FILE_BYTES
+        ):
+            raise IncomingFileError("publication source was unsafe")
+        total += metadata.st_size
+        if total > MAX_PUBLICATION_BYTES:
+            raise IncomingFileError("publication file set exceeds 50 MB")
+        prepared.append({"name": relative.name, "size": metadata.st_size})
+    return prepared
+
+
 def freeze_publication(
     workspace: Path,
     publication_id: str,
@@ -124,6 +162,7 @@ def freeze_publication(
     workspace = _workspace(workspace)
     publication_id = _command_id(publication_id)
     source_paths = _publication_paths(paths)
+    prepared = prepare_publication_files(workspace, paths)
     profile = workspace.parent
     volume_root = profile.parent.parent
     spool_root = volume_root / ".allies-publications" / profile.name
@@ -131,9 +170,7 @@ def freeze_publication(
     existing = _read_publication_manifest(manifest_path, publication_id, source_paths)
     if existing is not None:
         return existing
-    total = sum((workspace / path).stat().st_size for path in source_paths)
-    if total > MAX_PUBLICATION_BYTES:
-        raise IncomingFileError("publication file set exceeds 50 MB")
+    total = sum(int(item["size"]) for item in prepared)
     _reserve_publication(volume_root, profile.name, publication_id, total)
     temporary = spool_root / f".{publication_id}.{os.urandom(8).hex()}.copy"
     final = spool_root / publication_id
@@ -224,6 +261,33 @@ def release_publication_spool(workspace: Path, publication_id: str) -> None:
     manifest_path.unlink(missing_ok=True)
     _sync_directory(spool_root)
     _release_publication(volume_root, publication_id)
+
+
+def recover_publication_manifests(
+    workspace: Path, limit: int = MAX_PUBLICATION_MANIFESTS
+) -> tuple[PublicationManifest, ...]:
+    """Read only the bounded, journal-owned snapshots for one profile."""
+
+    workspace = _workspace(workspace)
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
+        raise IncomingFileError("publication recovery limit was invalid")
+    root = workspace.parent.parent.parent / ".allies-publications" / workspace.parent.name
+    if not root.exists():
+        return ()
+    if root.is_symlink() or not root.is_dir():
+        raise IncomingFileError("publication spool was unsafe")
+    manifests: list[PublicationManifest] = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            publication_id = _command_id(path.stem)
+        except IncomingFileError:
+            continue
+        manifest = _read_publication_manifest(path, publication_id, None)
+        if manifest is not None:
+            manifests.append(manifest)
+        if len(manifests) == limit:
+            break
+    return tuple(manifests)
 
 
 def cleanup_profile_publication_spools(volume_root: Path, profile_key: str) -> None:
@@ -350,6 +414,7 @@ async def stage_incoming_files(
     fetch: FileFetcher,
     *,
     clock: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
 ) -> StagedManifest:
     """Stage the complete manifest before the model can see any path.
 
@@ -357,6 +422,7 @@ async def stage_incoming_files(
     replay writes a new isolated directory. It never replaces the old copy.
     """
 
+    _check_cancelled(cancelled)
     descriptors = parse_incoming_files(value)
     command_id = _command_id(command_id)
     manifest_sha256 = _manifest_sha256(descriptors)
@@ -366,6 +432,7 @@ async def stage_incoming_files(
     if previous is not None:
         staged = _receipt_manifest(previous, command_id, manifest_sha256, descriptors)
         if staged is not None and _staged_files_match(workspace, staged):
+            _check_cancelled(cancelled)
             return StagedManifest(command_id, manifest_sha256, staged)
 
     started = clock()
@@ -376,13 +443,19 @@ async def stage_incoming_files(
         workspace / "attachments", command_id, previous is not None
     )
     files: list[StagedFile] = []
+    committed = False
     try:
+        _check_cancelled(cancelled)
         temporary.mkdir(mode=0o700)
         for descriptor in descriptors:
+            _check_cancelled(cancelled)
             _check_deadline(started, clock, MAX_SET_SECONDS)
-            target_name = f"{descriptor.file_id}-{descriptor.name}"
+            target_name = descriptor.file_id
             target = temporary / target_name
-            await _download_file(descriptor, target, fetch, clock, started)
+            await _download_file(
+                descriptor, target, fetch, clock, started, cancelled=cancelled
+            )
+            _check_cancelled(cancelled)
             files.append(
                 StagedFile(
                     descriptor=descriptor,
@@ -391,10 +464,14 @@ async def stage_incoming_files(
                     ).as_posix(),
                 )
             )
+        _check_cancelled(cancelled)
         _directory(final_root.parent)
+        _check_cancelled(cancelled)
         os.replace(temporary, final_root)
+        committed = True
         _sync_directory(final_root.parent)
         staged = tuple(files)
+        _check_cancelled(cancelled)
         _write_receipt(
             receipt_path,
             {
@@ -407,9 +484,13 @@ async def stage_incoming_files(
         return StagedManifest(command_id, manifest_sha256, staged)
     except IncomingFileError:
         _remove_tree(temporary)
+        if committed:
+            _remove_tree(final_root)
         raise
     except (OSError, UnicodeError):
         _remove_tree(temporary)
+        if committed:
+            _remove_tree(final_root)
         raise IncomingFileError("incoming file staging failed") from None
 
 
@@ -419,6 +500,8 @@ async def _download_file(
     fetch: FileFetcher,
     clock: Callable[[], float],
     set_started: float,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     started = clock()
     received = 0
@@ -429,6 +512,7 @@ async def _download_file(
     try:
         with target.open("xb") as handle:
             async for chunk in source:
+                _check_cancelled(cancelled)
                 _check_deadline(started, clock, MAX_FILE_SECONDS)
                 _check_deadline(set_started, clock, MAX_SET_SECONDS)
                 if (
@@ -441,7 +525,9 @@ async def _download_file(
                 if received > descriptor.size:
                     raise IncomingFileError("incoming file size did not match manifest")
                 digest.update(chunk)
+                _check_cancelled(cancelled)
                 handle.write(chunk)
+            _check_cancelled(cancelled)
             handle.flush()
             os.fsync(handle.fileno())
     except IncomingFileError:
@@ -574,7 +660,7 @@ def _next_target(root: Path, command_id: str, replay: bool) -> Path:
 
 
 def _safe_name(value: object) -> bool:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 255:
+    if not isinstance(value, str) or not value or len(value) > 255:
         return False
     normalized = unicodedata.normalize("NFC", value)
     base_name = value.split(".", 1)[0].upper()
@@ -624,6 +710,11 @@ def _command_id(value: object) -> str:
 def _check_deadline(started: float, clock: Callable[[], float], limit: float) -> None:
     if clock() - started > limit:
         raise IncomingFileError("incoming file transfer timed out")
+
+
+def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise IncomingFileError("incoming file staging lease was lost")
 
 
 def _sync_directory(path: Path) -> None:
@@ -844,6 +935,38 @@ def _ledger_path(volume_root: Path) -> Path:
     return volume_root / ".allies-publication-ledger.json"
 
 
+def _ledger_lock_path(volume_root: Path) -> Path:
+    return volume_root / ".allies-publication-ledger.lock"
+
+
+@contextmanager
+def _ledger_lock(volume_root: Path):
+    """Serialize the short shared-volume ledger updates."""
+
+    key = str(volume_root)
+    with _publication_locks_guard:
+        local_lock = _publication_locks.setdefault(key, threading.Lock())
+    with local_lock:
+        path = _ledger_lock_path(volume_root)
+        if path.is_symlink():
+            raise IncomingFileError("publication reservation journal was invalid")
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError:
+            raise IncomingFileError("publication reservation journal was unavailable") from None
+        try:
+            if fcntl is not None:
+                # ponytail: global volume lock; split only if measured contention requires it.
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+
 def _read_ledger(volume_root: Path) -> dict[str, dict[str, object]]:
     path = _ledger_path(volume_root)
     if not path.exists():
@@ -889,53 +1012,60 @@ def _reserve_publication(
     volume_root: Path, profile_key: str, publication_id: str, size: int
 ) -> None:
     _directory(volume_root)
-    records = _read_ledger(volume_root)
-    current = records.get(publication_id)
-    if current is not None:
-        if current.get("profile") == profile_key and current.get("size") == size:
-            return
-        raise IncomingFileError("publication reservation conflicted")
-    profile_records = [
-        record for record in records.values() if record["profile"] == profile_key
-    ]
-    if len(profile_records) >= MAX_PUBLICATION_MANIFESTS:
-        raise IncomingFileError("local storage capacity is unavailable")
-    if (
-        sum(record["state"] == "copying" for record in profile_records)
-        >= MAX_PUBLICATION_INCOMPLETE
-    ):
-        raise IncomingFileError("local storage capacity is unavailable")
-    if (
-        sum(int(record["size"]) for record in profile_records) + size
-        > MAX_PROFILE_PUBLICATION_BYTES
-    ):
-        raise IncomingFileError("local storage capacity is unavailable")
-    if (
-        sum(int(record["size"]) for record in records.values()) + size
-        > MAX_VOLUME_PUBLICATION_BYTES
-    ):
-        raise IncomingFileError("local storage capacity is unavailable")
-    if shutil.disk_usage(volume_root).free - size < MIN_VOLUME_FREE_BYTES:
-        raise IncomingFileError("local storage capacity is unavailable")
-    records[publication_id] = {"profile": profile_key, "size": size, "state": "copying"}
-    _write_ledger(volume_root, records)
+    with _ledger_lock(volume_root):
+        records = _read_ledger(volume_root)
+        current = records.get(publication_id)
+        if current is not None:
+            if current.get("profile") == profile_key and current.get("size") == size:
+                return
+            raise IncomingFileError("publication reservation conflicted")
+        profile_records = [
+            record for record in records.values() if record["profile"] == profile_key
+        ]
+        if len(profile_records) >= MAX_PUBLICATION_MANIFESTS:
+            raise IncomingFileError("local storage capacity is unavailable")
+        if (
+            sum(record["state"] == "copying" for record in profile_records)
+            >= MAX_PUBLICATION_INCOMPLETE
+        ):
+            raise IncomingFileError("local storage capacity is unavailable")
+        if (
+            sum(int(record["size"]) for record in profile_records) + size
+            > MAX_PROFILE_PUBLICATION_BYTES
+        ):
+            raise IncomingFileError("local storage capacity is unavailable")
+        if (
+            sum(int(record["size"]) for record in records.values()) + size
+            > MAX_VOLUME_PUBLICATION_BYTES
+        ):
+            raise IncomingFileError("local storage capacity is unavailable")
+        if shutil.disk_usage(volume_root).free - size < MIN_VOLUME_FREE_BYTES:
+            raise IncomingFileError("local storage capacity is unavailable")
+        records[publication_id] = {
+            "profile": profile_key,
+            "size": size,
+            "state": "copying",
+        }
+        _write_ledger(volume_root, records)
 
 
 def _mark_publication_frozen(volume_root: Path, publication_id: str) -> None:
-    records = _read_ledger(volume_root)
-    record = records.get(publication_id)
-    if record is None:
-        raise IncomingFileError("publication reservation was unavailable")
-    record["state"] = "frozen"
-    _write_ledger(volume_root, records)
+    with _ledger_lock(volume_root):
+        records = _read_ledger(volume_root)
+        record = records.get(publication_id)
+        if record is None:
+            raise IncomingFileError("publication reservation was unavailable")
+        record["state"] = "frozen"
+        _write_ledger(volume_root, records)
 
 
 def _release_publication(volume_root: Path, publication_id: str) -> None:
-    records = _read_ledger(volume_root)
-    if publication_id not in records:
-        return
-    del records[publication_id]
-    _write_ledger(volume_root, records)
+    with _ledger_lock(volume_root):
+        records = _read_ledger(volume_root)
+        if publication_id not in records:
+            return
+        del records[publication_id]
+        _write_ledger(volume_root, records)
 
 
 __all__ = [
@@ -948,7 +1078,9 @@ __all__ = [
     "cleanup_profile_publication_spools",
     "freeze_publication",
     "parse_incoming_files",
+    "prepare_publication_files",
     "publication_spool_path",
+    "recover_publication_manifests",
     "release_publication_spool",
     "stage_incoming_files",
     "validate_hermes_file_context",

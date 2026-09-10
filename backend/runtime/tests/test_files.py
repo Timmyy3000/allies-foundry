@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from urllib.error import HTTPError
 from uuid import uuid4
 
 import pytest
 from django.utils import timezone
 
 import runtime.services.files as file_service
-from runtime.exceptions import RuntimeLeaseConflictError
+from runtime.exceptions import RuntimeLeaseConflictError, RuntimeValidationError
 from runtime.models import (
     Execution,
     RuntimeProfile,
@@ -131,3 +132,34 @@ def test_proxy_denies_a_file_outside_the_frozen_manifest(file_claim, settings):
         file_service.open_incoming_file(
             context, claim.attempt_id, claim.lease_token, uuid4()
         )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("status, expected_opens", [(404, 1), (503, 3)])
+def test_cloud_open_errors_are_terminal_before_model_dispatch(
+    file_claim, settings, monkeypatch, status, expected_opens
+):
+    context, claim, _execution, file_id, _content = file_claim
+    settings.ALLIES_RUNTIME_FILE_INPUT_ENABLED = True
+    settings.ALLIES_CLOUD_URL = "https://cloud.example.test"
+    settings.ALLIES_CLOUD_EVENT_SERVICE_TOKEN = "s" * 32
+    sleeps = []
+
+    class FailingOpener:
+        opens = 0
+
+        def open(self, request, *, timeout):
+            self.opens += 1
+            raise HTTPError(request.full_url, status, "failed", {}, None)
+
+    opener = FailingOpener()
+    monkeypatch.setattr(file_service, "build_opener", lambda *_handlers: opener)
+    monkeypatch.setattr(file_service, "sleep", sleeps.append)
+
+    with pytest.raises(RuntimeValidationError, match="unavailable"):
+        file_service.open_incoming_file(
+            context, claim.attempt_id, claim.lease_token, file_id
+        )
+
+    assert opener.opens == expected_opens
+    assert sleeps == ([1, 2] if status == 503 else [])

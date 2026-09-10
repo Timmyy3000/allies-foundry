@@ -197,6 +197,7 @@ def _stream_request_body(
     message: str,
     reasoning_effort: str | None,
     file_context: Mapping[str, Any] | None = None,
+    publication_context: str | None = None,
 ) -> bytes:
     request_body = {"message": message}
     if reasoning_effort is not None:
@@ -205,7 +206,13 @@ def _stream_request_body(
         }
     if file_context is not None:
         request_body["allies_file_context"] = validate_hermes_file_context(file_context)
-    return json.dumps(request_body, separators=(",", ":")).encode("utf-8")
+    if publication_context is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", publication_context):
+            raise ValueError("Hermes publication context was invalid")
+        request_body["allies_file_publication_context"] = publication_context
+    return json.dumps(
+        request_body, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
 
 
 def _validated_tool_name(value: Any) -> str:
@@ -2047,6 +2054,7 @@ class HermesClient:
         reasoning_effort: str | None = None,
         routine_result: bool = False,
         file_context: Mapping[str, Any] | None = None,
+        publication_context: str | None = None,
     ) -> _ObservedHermesStream:
         """Open an SSE response and yield events without buffering the body."""
 
@@ -2089,7 +2097,9 @@ class HermesClient:
                 self._profile_credential(profile_id), self.settings.stream_timeout
             )
             path = f"/p/{profile_id}/api/sessions/{session_id}/chat/stream"
-            body = _stream_request_body(message, reasoning_effort, file_context)
+            body = _stream_request_body(
+                message, reasoning_effort, file_context, publication_context
+            )
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._request,

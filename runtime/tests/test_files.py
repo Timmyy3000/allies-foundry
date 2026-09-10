@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from uuid import uuid4
 
 import pytest
+
 from allies_runtime.errors import IncomingFileError
 from allies_runtime.files import (
     cleanup_profile_publication_spools,
@@ -15,8 +17,15 @@ from allies_runtime.files import (
     stage_incoming_files,
     validate_hermes_file_context,
 )
-from allies_runtime.foundry import FoundryClaim, FoundryWorker, TerminalReceipt
+from allies_runtime.foundry import (
+    FoundryClaim,
+    FoundryWorker,
+    InvalidRequestError,
+    LeaseConflictError,
+    TerminalReceipt,
+)
 from allies_runtime.hermes import HermesEvent, _stream_request_body
+from allies_runtime.publication_bridge import PublicationBridge
 
 
 def _descriptor(content: bytes) -> dict[str, object]:
@@ -80,6 +89,32 @@ async def test_stage_rejects_a_bad_digest_before_the_manifest_becomes_visible(tm
     assert not attachments.exists() or not list(attachments.iterdir())
 
 
+@pytest.mark.asyncio
+async def test_stage_cancellation_never_commits_a_replacement_or_receipt(tmp_path):
+    workspace = tmp_path / "profile" / "workspace"
+    workspace.mkdir(parents=True)
+    descriptor = _descriptor(b"one")
+    checks = 0
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 8
+
+    with pytest.raises(IncomingFileError, match="lease was lost"):
+        await stage_incoming_files(
+            workspace,
+            str(uuid4()),
+            [descriptor],
+            lambda _descriptor: _chunks(b"one"),
+            cancelled=cancelled,
+        )
+
+    attachments = workspace / "attachments"
+    assert not attachments.exists() or not list(attachments.iterdir())
+    assert not (workspace.parent / ".allies-incoming-receipts").exists()
+
+
 def test_hermes_context_is_bounded_and_content_free():
     descriptor = _descriptor(b"one")
     context = {
@@ -102,6 +137,36 @@ def test_manifest_rejects_a_windows_reserved_file_name():
         parse_incoming_files([descriptor])
 
 
+@pytest.mark.asyncio
+async def test_stage_accepts_character_bounded_names_without_using_them_as_paths(tmp_path):
+    workspace = tmp_path / "profile" / "workspace"
+    workspace.mkdir(parents=True)
+    descriptor = _descriptor(b"one")
+    descriptor["name"] = "a" * 255
+
+    receipt = await stage_incoming_files(
+        workspace,
+        str(uuid4()),
+        [descriptor],
+        lambda _descriptor: _chunks(b"one"),
+    )
+
+    path = workspace / receipt.files[0].path
+    assert path.name == descriptor["file_id"]
+    assert path.read_bytes() == b"one"
+
+
+def test_incoming_name_is_bounded_by_characters_not_utf8_bytes():
+    descriptor = _descriptor(b"one")
+    descriptor["name"] = "😀" * 255
+
+    assert parse_incoming_files([descriptor])[0].name == descriptor["name"]
+
+    descriptor["name"] = "a" * 256
+    with pytest.raises(IncomingFileError):
+        parse_incoming_files([descriptor])
+
+
 def test_hermes_request_uses_a_structured_file_context():
     descriptor = _descriptor(b"one")
     context = {
@@ -112,6 +177,28 @@ def test_hermes_request_uses_a_structured_file_context():
 
     body = json.loads(_stream_request_body("", None, context))
     assert body == {"message": "", "allies_file_context": context}
+
+
+def test_hermes_context_uses_utf8_without_ascii_escape_expansion():
+    files = []
+    for _ in range(10):
+        descriptor = _descriptor(b"one")
+        descriptor["name"] = "😀" * 255
+        files.append(
+            {
+                **descriptor,
+                "path": f"attachments/turn/{descriptor['file_id']}",
+            }
+        )
+
+    encoded = _stream_request_body(
+        "",
+        None,
+        {"schema_version": "v1", "kind": "allies_incoming_files", "files": files},
+    )
+
+    assert b"\\ud83d" not in encoded
+    assert len(encoded) < 16 * 1024
 
 
 def test_publication_freezes_once_outside_the_model_workspace(tmp_path):
@@ -159,6 +246,95 @@ def test_publication_rejects_links_and_profile_cleanup_is_scoped(tmp_path):
 
     assert not (tmp_path / ".allies-publications" / "ally").exists()
     assert (sibling / "keep.txt").read_bytes() == b"keep"
+
+
+@pytest.mark.asyncio
+async def test_publication_bridge_freezes_then_uploads_without_a_model_call(tmp_path):
+    workspace = tmp_path / "profiles" / "ally" / "workspace"
+    workspace.mkdir(parents=True)
+    source = workspace / "result.csv"
+    source.write_bytes(b"stable result")
+    publication_id = str(uuid4())
+    cloud_file_id = str(uuid4())
+    calls = []
+
+    class ProfileStore:
+        def workspace_path(self, profile_key):
+            assert profile_key == "ally"
+            return workspace
+
+    class Foundry:
+        async def create_publication_intent(self, *args):
+            calls.append(("intent", args))
+            return {"publication_id": publication_id, "state": "preparing"}
+
+        async def freeze_publication_intent(self, *args):
+            calls.append(("frozen", args))
+            return {"publication_id": publication_id, "state": "frozen"}
+
+        async def register_publication(self, *args):
+            calls.append(("register", args))
+            return {
+                "publication_id": publication_id,
+                "state": "uploading",
+                "revision": 1,
+                "files": [{"id": cloud_file_id, "generation": 1, "state": "pending"}],
+            }
+
+        async def upload_publication_file(self, *args):
+            calls.append(("upload", args))
+            return {"id": cloud_file_id, "generation": 1, "state": "validating"}
+
+        async def get_publication(self, *args):
+            calls.append(("get", args))
+            return {
+                "publication_id": publication_id,
+                "state": "ready",
+                "files": [{"name": "result.csv", "open_path": "/files/ready"}],
+            }
+
+    claim = FoundryClaim(
+        attempt_id=str(uuid4()),
+        execution_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        hermes_profile_key="ally",
+        model="gpt-test",
+        conversation_id="conversation",
+        session_id="session",
+        stream_id="stream",
+        lease_id=str(uuid4()),
+        lease_token="lease",
+        expires_at=None,
+        payload={"message": ""},
+        claim_id=str(uuid4()),
+    )
+    bridge = PublicationBridge(Foundry(), ProfileStore(), tmp_path)
+    context = bridge.activate(claim)
+
+    result = await bridge.publish(context, "publish-1", ["result.csv"])
+    source.write_bytes(b"edited after freeze")
+
+    assert result == {
+        "publication_id": publication_id,
+        "state": "ready",
+        "files": [{"name": "result.csv", "open_path": "/files/ready"}],
+    }
+    assert [name for name, _args in calls] == [
+        "intent",
+        "frozen",
+        "register",
+        "upload",
+        "get",
+    ]
+    upload = calls[3][1]
+    assert upload[4] == b"stable result"
+
+    bridge.deactivate(context)
+    assert await bridge.publish(context, "publish-1", ["result.csv"]) == {
+        "state": "failed",
+        "retryable": True,
+        "error_code": "publication_context_invalid",
+    }
 
 
 @pytest.mark.asyncio
@@ -237,6 +413,121 @@ async def test_worker_stages_files_before_it_invokes_hermes(tmp_path):
     receipt = await worker.run_claim(claim)
     assert receipt.status == "succeeded"
     assert calls == ["fetch", "event", "hermes"]
+
+
+@pytest.mark.asyncio
+async def test_worker_lease_loss_during_download_cannot_commit_or_call_hermes(tmp_path):
+    workspace = tmp_path / "profile" / "workspace"
+    workspace.mkdir(parents=True)
+    content = b"two chunks"
+    descriptor = _descriptor(content)
+    calls: list[str] = []
+
+    class ProfileStore:
+        def workspace_path(self, _profile_key):
+            return workspace
+
+    class Foundry:
+        async def incoming_file_chunks(self, _attempt, _file, _lease):
+            calls.append("fetch")
+            yield content[:3]
+            await asyncio.sleep(0.03)
+            yield content[3:]
+
+        async def renew(self, _attempt, _lease):
+            raise LeaseConflictError("lease expired")
+
+        async def stopped(self, *_args, **_kwargs):
+            calls.append("stopped")
+            return TerminalReceipt("attempt", "stopped", "receipt")
+
+        async def fail(self, *_args, **_kwargs):
+            pytest.fail("worker must not fail or requeue a stale staged file")
+
+    class Hermes:
+        async def stream_profile_incremental(self, *_args, **_kwargs):
+            pytest.fail("worker must not invoke Hermes after lease loss")
+
+    claim = FoundryClaim(
+        attempt_id=str(uuid4()),
+        execution_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        hermes_profile_key="ally",
+        model="gpt-test",
+        conversation_id="conversation",
+        session_id="session",
+        stream_id="stream",
+        lease_id=str(uuid4()),
+        lease_token="lease",
+        expires_at=None,
+        payload={"message": "", "files": [descriptor]},
+        claim_id=str(uuid4()),
+    )
+    worker = FoundryWorker(
+        Foundry(),
+        Hermes(),
+        profile_store=ProfileStore(),
+        file_input_enabled=True,
+        renew_interval=0.01,
+        lease_seconds=1,
+        stop_safety_margin=0.1,
+    )
+
+    receipt = await worker.run_claim(claim)
+
+    assert receipt.status == "stopped"
+    assert calls == ["fetch", "stopped"]
+    attachments = workspace / "attachments"
+    assert not attachments.exists() or not list(attachments.iterdir())
+    assert not (workspace.parent / ".allies-incoming-receipts").exists()
+
+
+@pytest.mark.asyncio
+async def test_worker_terminalizes_a_cloud_file_error_before_model_dispatch(tmp_path):
+    workspace = tmp_path / "profile" / "workspace"
+    workspace.mkdir(parents=True)
+    descriptor = _descriptor(b"unavailable")
+    calls: list[str] = []
+
+    class ProfileStore:
+        def workspace_path(self, _profile_key):
+            return workspace
+
+    class Foundry:
+        async def incoming_file_chunks(self, *_args):
+            raise InvalidRequestError("accepted file is unavailable")
+            yield b""  # pragma: no cover - keeps this an async generator
+
+        async def fail(self, *_args, **kwargs):
+            calls.append(kwargs["code"])
+            return TerminalReceipt("attempt", "failed", "receipt")
+
+    class Hermes:
+        async def stream_profile_incremental(self, *_args, **_kwargs):
+            pytest.fail("worker must not invoke Hermes after a Cloud file error")
+
+    claim = FoundryClaim(
+        attempt_id=str(uuid4()),
+        execution_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        hermes_profile_key="ally",
+        model="gpt-test",
+        conversation_id="conversation",
+        session_id="session",
+        stream_id="stream",
+        lease_id=str(uuid4()),
+        lease_token="lease",
+        expires_at=None,
+        payload={"message": "", "files": [descriptor]},
+        claim_id=str(uuid4()),
+    )
+
+    receipt = await FoundryWorker(
+        Foundry(), Hermes(), profile_store=ProfileStore(), file_input_enabled=True
+    ).run_claim(claim)
+
+    assert receipt.status == "failed"
+    assert calls == ["INVALID_REQUEST"]
 
 
 @pytest.mark.asyncio

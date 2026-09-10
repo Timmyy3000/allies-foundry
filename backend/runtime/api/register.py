@@ -58,8 +58,13 @@ from runtime.services.profiles import (
 )
 from runtime.services.publications import (
     acknowledge_frozen_publication,
+    claim_publication_retries,
     create_publication_intent,
+    get_publication,
     list_publication_intents,
+    record_publication_retry,
+    register_publication,
+    upload_publication_file,
 )
 from runtime.services.routines import (
     accept_routine_dispatch,
@@ -86,6 +91,9 @@ from .schemas import (
     ProfileProvisioningRequest,
     PublicationFrozenRequest,
     PublicationIntentRequest,
+    PublicationRegisterRequest,
+    PublicationRetryClaimRequest,
+    PublicationRetryResultRequest,
     RoutineSessionBindingRequest,
     RuntimeActivityWaitReceipt,
     RuntimeActivityWaitRequest,
@@ -296,6 +304,112 @@ def register(api: NinjaExtraAPI) -> None:
                 },
                 status=200,
             )
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.post("/runtime/attempts/{attempt_id}/file-publications", auth=None)
+    def register_file_publication(
+        request: HttpRequest,
+        attempt_id: UUID,
+        payload: PublicationRegisterRequest,
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            status, body = register_publication(
+                context,
+                attempt_id,
+                _lease_token(request),
+                payload.publication_id,
+                [item.model_dump(mode="json") for item in payload.files],
+            )
+            return JsonResponse(body, status=status)
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.put(
+        "/runtime/profiles/{profile_id}/file-publications/{publication_id}/files/{file_id}/content",
+        auth=None,
+    )
+    def upload_file_publication(
+        request: HttpRequest,
+        profile_id: UUID,
+        publication_id: UUID,
+        file_id: UUID,
+        generation: int,
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            revision = request.headers.get("X-Allies-Publication-Revision", "")
+            try:
+                revision_value = int(revision)
+            except ValueError as exc:
+                raise RuntimeValidationError("publication revision is invalid") from exc
+            lease_value = request.headers.get("X-Allies-Publication-Lease-Token")
+            lease_token = UUID(lease_value) if lease_value else None
+            status, body = upload_publication_file(
+                context,
+                profile_id,
+                publication_id,
+                file_id,
+                generation,
+                request.body,
+                revision_value,
+                lease_token,
+            )
+            return JsonResponse(body, status=status)
+        except (RuntimeDomainError, ValueError) as exc:
+            return _error(
+                exc
+                if isinstance(exc, RuntimeDomainError)
+                else RuntimeValidationError("publication lease token is invalid")
+            )
+
+    @api.get(
+        "/runtime/profiles/{profile_id}/file-publications/{publication_id}", auth=None
+    )
+    def file_publication(request: HttpRequest, profile_id: UUID, publication_id: UUID):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            status, body = get_publication(context, profile_id, publication_id)
+            return JsonResponse(body, status=status)
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.post(
+        "/runtime/profiles/{profile_id}/file-publication-retries/claim", auth=None
+    )
+    def claim_file_publication_retries(
+        request: HttpRequest, profile_id: UUID, payload: PublicationRetryClaimRequest
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            items = claim_publication_retries(context, profile_id, payload.limit)
+            return JsonResponse({"items": list(items)}, status=200)
+        except RuntimeDomainError as exc:
+            return _error(exc)
+
+    @api.post(
+        "/runtime/profiles/{profile_id}/file-publications/{publication_id}/retry-result",
+        auth=None,
+    )
+    def file_publication_retry_result(
+        request: HttpRequest,
+        profile_id: UUID,
+        publication_id: UUID,
+        payload: PublicationRetryResultRequest,
+    ):
+        try:
+            context = authenticate_runtime_token(_bearer(request))
+            status, body = record_publication_retry(
+                context,
+                profile_id,
+                publication_id,
+                payload.revision,
+                payload.lease_token,
+                payload.outcome,
+                payload.safe_error_code,
+            )
+            return JsonResponse(body, status=status)
         except RuntimeDomainError as exc:
             return _error(exc)
 

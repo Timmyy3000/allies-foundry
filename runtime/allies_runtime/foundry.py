@@ -28,6 +28,7 @@ from .errors import (
     HermesHistoryMismatch,
     HermesMalformedResponse,
     HermesTimeout,
+    IncomingFileError,
 )
 from .files import stage_incoming_files
 from .hermes import (
@@ -58,6 +59,7 @@ LEASE_SECONDS = 60.0
 DEFAULT_RENEW_INTERVAL = 20.0
 DEFAULT_STOP_SAFETY_MARGIN = 5.0
 DEFAULT_PROFILE_RECONCILE_INTERVAL = 5.0
+DEFAULT_PUBLICATION_RECOVERY_INTERVAL = 30.0
 MAX_PROFILE_RECONCILIATION_RETRY_DELAY = 5.0
 MIN_IDLE_BACKOFF_SECONDS = 1.0
 MAX_IDLE_BACKOFF_SECONDS = 10.0
@@ -155,7 +157,7 @@ class FoundryTransport(Protocol):
         path: str,
         *,
         headers: Mapping[str, str],
-        body: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | bytes | None = None,
     ) -> Any: ...
 
     async def stream(
@@ -442,12 +444,14 @@ class UrllibFoundryTransport:
         path: str,
         *,
         headers: Mapping[str, str],
-        body: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | bytes | None = None,
     ) -> Any:
         payload = (
-            None
-            if body is None
+            body
+            if isinstance(body, bytes)
             else json.dumps(body, separators=(",", ":")).encode("utf-8")
+            if body is not None
+            else None
         )
 
         def send() -> Mapping[str, Any]:
@@ -456,7 +460,7 @@ class UrllibFoundryTransport:
                 data=payload,
                 method=method,
                 headers={**headers, "Content-Type": "application/json"}
-                if payload is not None
+                if body is not None and not isinstance(body, bytes)
                 else dict(headers),
             )
             try:
@@ -650,6 +654,13 @@ def _optional_text(value: Any) -> str | None:
     return value
 
 
+def _publication_uuid(value: str | UUID) -> str:
+    try:
+        return str(UUID(str(value)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("publication identity must be a UUID") from exc
+
+
 def _error_for(status: int, payload: Mapping[str, Any] | None) -> FoundryError:
     code = str(payload.get("code", "")) if payload else ""
     message = "Foundry rejected the runtime request"
@@ -713,7 +724,8 @@ class FoundryClient:
         path: str,
         *,
         lease_token: str | None = None,
-        body: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | bytes | None = None,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> Mapping[str, Any] | None:
         headers = {
             "Accept": "application/json",
@@ -728,6 +740,8 @@ class FoundryClient:
             ):
                 raise ValueError("lease token must be a bounded header value")
             headers["X-Foundry-Lease-Token"] = lease_token
+        if extra_headers is not None:
+            headers.update(extra_headers)
         try:
             request = getattr(self._transport, "request", self._transport)
             try:
@@ -905,6 +919,152 @@ class FoundryClient:
             raise ResponseLossError("Foundry file response was lost") from exc
         finally:
             response.close()
+
+    async def create_publication_intent(
+        self,
+        attempt_id: str | UUID,
+        lease_token: str,
+        tool_call_id: str,
+        files: list[Mapping[str, object]],
+    ) -> Mapping[str, Any]:
+        return await self._publication_response(
+            "POST",
+            f"/api/v1/runtime/attempts/{_publication_uuid(attempt_id)}/file-publication-intents",
+            lease_token=lease_token,
+            body={"tool_call_id": tool_call_id, "files": [dict(item) for item in files]},
+        )
+
+    async def freeze_publication_intent(
+        self,
+        profile_id: str | UUID,
+        publication_id: str | UUID,
+        files: list[Mapping[str, object]],
+    ) -> Mapping[str, Any]:
+        return await self._publication_response(
+            "POST",
+            "/api/v1/runtime/profiles/"
+            f"{_publication_uuid(profile_id)}/file-publication-intents/"
+            f"{_publication_uuid(publication_id)}/frozen",
+            body={"files": [dict(item) for item in files]},
+        )
+
+    async def register_publication(
+        self,
+        attempt_id: str | UUID,
+        lease_token: str,
+        publication_id: str | UUID,
+        files: list[Mapping[str, object]],
+    ) -> Mapping[str, Any]:
+        return await self._publication_response(
+            "POST",
+            f"/api/v1/runtime/attempts/{_publication_uuid(attempt_id)}/file-publications",
+            lease_token=lease_token,
+            body={
+                "publication_id": _publication_uuid(publication_id),
+                "files": [dict(item) for item in files],
+            },
+        )
+
+    async def upload_publication_file(
+        self,
+        profile_id: str | UUID,
+        publication_id: str | UUID,
+        file_id: str | UUID,
+        generation: int,
+        content: bytes,
+        revision: int,
+        lease_token: str | UUID | None = None,
+    ) -> Mapping[str, Any]:
+        if isinstance(generation, bool) or generation < 1:
+            raise ValueError("publication generation must be positive")
+        if isinstance(revision, bool) or revision < 1:
+            raise ValueError("publication revision must be positive")
+        if not isinstance(content, bytes) or not content:
+            raise ValueError("publication content must be non-empty bytes")
+        headers = {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(len(content)),
+            "X-Allies-Publication-Revision": str(revision),
+        }
+        if lease_token is not None:
+            headers["X-Allies-Publication-Lease-Token"] = _publication_uuid(
+                lease_token
+            )
+        return await self._publication_response(
+            "PUT",
+            "/api/v1/runtime/profiles/"
+            f"{_publication_uuid(profile_id)}/file-publications/"
+            f"{_publication_uuid(publication_id)}/files/{_publication_uuid(file_id)}"
+            f"/content?generation={generation}",
+            body=content,
+            extra_headers=headers,
+        )
+
+    async def get_publication(
+        self, profile_id: str | UUID, publication_id: str | UUID
+    ) -> Mapping[str, Any]:
+        return await self._publication_response(
+            "GET",
+            "/api/v1/runtime/profiles/"
+            f"{_publication_uuid(profile_id)}/file-publications/"
+            f"{_publication_uuid(publication_id)}",
+        )
+
+    async def claim_publication_retries(
+        self, profile_id: str | UUID, limit: int = 20
+    ) -> list[Mapping[str, Any]]:
+        if isinstance(limit, bool) or not 1 <= limit <= 20:
+            raise ValueError("publication recovery limit must be from 1 to 20")
+        value = await self._publication_response(
+            "POST",
+            "/api/v1/runtime/profiles/"
+            f"{_publication_uuid(profile_id)}/file-publication-retries/claim",
+            body={"limit": limit},
+        )
+        items = value.get("items")
+        if not isinstance(items, list) or any(not isinstance(item, Mapping) for item in items):
+            raise FoundryError(
+                "Foundry publication recovery response was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
+        return [dict(item) for item in items]
+
+    async def publication_retry_result(
+        self,
+        profile_id: str | UUID,
+        publication_id: str | UUID,
+        revision: int,
+        lease_token: str | UUID,
+        outcome: str,
+        safe_error_code: str | None = None,
+    ) -> Mapping[str, Any]:
+        body: dict[str, object] = {
+            "revision": revision,
+            "lease_token": _publication_uuid(lease_token),
+            "outcome": outcome,
+        }
+        if safe_error_code is not None:
+            body["safe_error_code"] = safe_error_code
+        return await self._publication_response(
+            "POST",
+            "/api/v1/runtime/profiles/"
+            f"{_publication_uuid(profile_id)}/file-publications/"
+            f"{_publication_uuid(publication_id)}/retry-result",
+            body=body,
+        )
+
+    async def _publication_response(
+        self, method: str, path: str, **kwargs: Any
+    ) -> Mapping[str, Any]:
+        result = await self._request(method, path, **kwargs)
+        if not isinstance(result, Mapping):
+            raise FoundryError(
+                "Foundry publication response was malformed",
+                status=200,
+                code="MALFORMED_RESPONSE",
+            )
+        return result
 
     async def reconciliation_snapshot(self) -> RuntimeReconciliationSnapshot:
         """Read profile state plus the current server-owned start epoch."""
@@ -1470,6 +1630,7 @@ async def _stream_events(
     reasoning_effort: str | None = None,
     routine_result: bool = False,
     file_context: Mapping[str, Any] | None = None,
+    publication_context: str | None = None,
 ) -> Any:
     stream_kwargs: dict[str, Any] = {"session_key": session_key}
     if reasoning_effort is not None:
@@ -1478,6 +1639,8 @@ async def _stream_events(
         stream_kwargs["routine_result"] = True
     if file_context is not None:
         stream_kwargs["file_context"] = file_context
+    if publication_context is not None:
+        stream_kwargs["publication_context"] = publication_context
     method = getattr(hermes, "stream_profile_incremental", None)
     if callable(method):
         result = method(profile_id, session_id, message, **stream_kwargs)
@@ -1539,6 +1702,8 @@ class FoundryWorker:
         approval_poll_interval: float = APPROVAL_POLL_INTERVAL,
         profile_store: Any | None = None,
         file_input_enabled: bool = False,
+        publication_bridge: Any | None = None,
+        publication_recovery_interval: float = DEFAULT_PUBLICATION_RECOVERY_INTERVAL,
     ):
         if (
             isinstance(slots, bool)
@@ -1566,6 +1731,8 @@ class FoundryWorker:
             raise ValueError("approval poll interval must be between 0 and 5")
         if not isinstance(file_input_enabled, bool):
             raise TypeError("file input enabled must be a boolean")
+        if publication_recovery_interval <= 0:
+            raise ValueError("publication recovery interval must be positive")
         self.foundry = foundry
         self.hermes = hermes
         self.slots = slots
@@ -1586,6 +1753,9 @@ class FoundryWorker:
         self._approval_poll_interval = float(approval_poll_interval)
         self._profile_store = profile_store
         self._file_input_enabled = file_input_enabled
+        self._publication_bridge = publication_bridge
+        self._publication_recovery_interval = publication_recovery_interval
+        self._last_publication_recovery: float | None = None
         self._activity_revision = 0
         self._active: set[asyncio.Task[Any]] = set()
         self._ambiguous_claims: dict[str, float] = {}
@@ -1872,6 +2042,7 @@ class FoundryWorker:
         stream = None
         stream_ref = [None]
         lost = asyncio.Event()
+        publication_context: str | None = None
         renewal: asyncio.Task[Any] | None = None
         sequence = 0
         result_text: list[str] = []
@@ -1977,6 +2148,9 @@ class FoundryWorker:
             if bootstrap is not None:
                 await self._bootstrap_first_turn(claim, session_id)
 
+            if claim.routine_id is None and self._publication_bridge is not None:
+                publication_context = self._publication_bridge.activate(claim)
+
             file_context = None
             if files is not None:
                 if claim.routine_id is not None:
@@ -1996,6 +2170,7 @@ class FoundryWorker:
                         descriptor.file_id,
                         claim.lease_token,
                     ),
+                    cancelled=lost.is_set,
                 )
                 if lost.is_set():
                     raise LeaseConflictError("lease was lost while staging files")
@@ -2044,6 +2219,7 @@ class FoundryWorker:
                 reasoning_effort=claim.reasoning_effort,
                 routine_result=claim.routine_id is not None,
                 file_context=file_context,
+                publication_context=publication_context,
             )
             stream_ref[0] = stream
             if renewal is None:
@@ -2627,6 +2803,8 @@ class FoundryWorker:
             except FoundryError:
                 return None
         finally:
+            if publication_context is not None and self._publication_bridge is not None:
+                self._publication_bridge.deactivate(publication_context)
             if renewal is not None:
                 renewal.cancel()
                 await asyncio.gather(renewal, return_exceptions=True)
@@ -2938,6 +3116,28 @@ class FoundryWorker:
             )
         return ActivityWaitReceipt(revision=revision, reason=reason)
 
+    async def _recover_publications(self, snapshot: Any) -> None:
+        bridge = self._publication_bridge
+        now = self._clock()
+        if (
+            bridge is None
+            or self._last_publication_recovery is not None
+            and now - self._last_publication_recovery
+            < self._publication_recovery_interval
+        ):
+            return
+        profiles = getattr(snapshot, "profiles", ()) if snapshot is not None else ()
+        self._last_publication_recovery = now
+        for profile in profiles[:1]:
+            profile_id = getattr(profile, "profile_id", None)
+            profile_key = getattr(profile, "hermes_profile_key", None)
+            if not isinstance(profile_id, str) or not isinstance(profile_key, str):
+                continue
+            try:
+                await bridge.recover(profile_id, profile_key, limit=20)
+            except (FoundryError, IncomingFileError, OSError, ValueError):
+                continue
+
     async def _reconcile_profiles(self, *, force: bool = False) -> None:
         if self.profile_reconciler is None:
             return
@@ -2956,6 +3156,7 @@ class FoundryWorker:
         self._profiles_reconciled = True
         self._last_profile_reconciliation = self._clock()
         snapshot = getattr(self.foundry, "last_reconciliation_snapshot", None)
+        await self._recover_publications(snapshot)
         if snapshot is not None:
             activity_revision = getattr(snapshot, "activity_revision", 0)
             if isinstance(activity_revision, int) and not isinstance(

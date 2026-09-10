@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from time import sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, build_opener
@@ -29,6 +30,8 @@ from .runtime_auth import RuntimeContext
 from .validation import digest_lease_token
 
 MAX_FILE_CHUNK_BYTES = 64 * 1024
+MAX_FILE_OPEN_ATTEMPTS = 3
+_FILE_OPEN_RETRY_DELAYS = (1, 2)
 FILE_CONTENT_PATH = "/api/v1/internal/v1/accepted-files/{file_id}/content"
 
 
@@ -83,19 +86,31 @@ def open_incoming_file(
         },
         method="GET",
     )
-    try:
-        response = build_opener(_NoRedirect).open(request, timeout=120)
-    except HTTPError as exc:
-        exc.close()
-        raise RuntimeLeaseConflictError("accepted file is unavailable") from None
-    except (TimeoutError, URLError, OSError):
-        raise RuntimeNotReadyError("accepted file transport is unavailable") from None
+    opener = build_opener(_NoRedirect)
+    response = _open_cloud_file(opener, request)
 
     return IncomingFileContent(
         content_type=authorized.descriptor.media_type,
         content_length=authorized.descriptor.size,
         chunks=_chunks(response, authorized.descriptor.size),
     )
+
+
+def _open_cloud_file(opener, request):
+    for attempt in range(MAX_FILE_OPEN_ATTEMPTS):
+        try:
+            return opener.open(request, timeout=120)
+        except HTTPError as exc:
+            status = int(exc.code)
+            exc.close()
+            if status != 503:
+                raise RuntimeValidationError("accepted file is unavailable") from None
+        except (TimeoutError, URLError, OSError):
+            pass
+        if attempt + 1 == MAX_FILE_OPEN_ATTEMPTS:
+            break
+        sleep(_FILE_OPEN_RETRY_DELAYS[attempt])
+    raise RuntimeValidationError("accepted file is unavailable")
 
 
 def _authorize_file(
@@ -184,6 +199,7 @@ def _chunks(response, expected_size: int) -> Iterator[bytes]:
 __all__ = [
     "FILE_CONTENT_PATH",
     "MAX_FILE_CHUNK_BYTES",
+    "MAX_FILE_OPEN_ATTEMPTS",
     "IncomingFileContent",
     "open_incoming_file",
 ]
