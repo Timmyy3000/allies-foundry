@@ -40,6 +40,7 @@ MAX_PARTIAL_PUBLICATION_CLEANUP = 100
 PARTIAL_PUBLICATION_STALE_SECONDS = 24 * 60 * 60
 _PUBLICATION_SCHEMA = "allies.publication.v1"
 _RECEIPT_SCHEMA = "allies.incoming-files.v1"
+_PUBLICATION_STATE_DIRECTORY = ".allies-publication-state"
 _publication_locks: dict[str, threading.Lock] = {}
 _publication_locks_guard = threading.Lock()
 _WINDOWS_RESERVED_NAMES = frozenset(
@@ -1147,12 +1148,49 @@ def _write_publication_manifest(
     _write_receipt(path, value)
 
 
+def _publication_state_root(volume_root: Path) -> Path:
+    root = volume_root / _PUBLICATION_STATE_DIRECTORY
+    if os.name == "nt":
+        _directory(root)
+        return root
+    try:
+        volume_metadata = volume_root.lstat()
+        if (
+            volume_root.is_symlink()
+            or not stat.S_ISDIR(volume_metadata.st_mode)
+            or volume_metadata.st_uid != 0
+            or volume_metadata.st_gid != 0
+            or stat.S_IMODE(volume_metadata.st_mode) != 0o1777
+        ):
+            raise IncomingFileError("publication reservation journal was unavailable")
+        try:
+            metadata = root.lstat()
+        except FileNotFoundError:
+            root.mkdir(mode=0o700)
+            os.chown(root, 0, 0)
+            os.chmod(root, 0o700)
+            metadata = root.lstat()
+        if (
+            root.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise IncomingFileError("publication reservation journal was unavailable")
+    except OSError:
+        raise IncomingFileError(
+            "publication reservation journal was unavailable"
+        ) from None
+    return root
+
+
 def _ledger_path(volume_root: Path) -> Path:
-    return volume_root / ".allies-publication-ledger.json"
+    return _publication_state_root(volume_root) / "ledger.json"
 
 
 def _ledger_lock_path(volume_root: Path) -> Path:
-    return volume_root / ".allies-publication-ledger.lock"
+    return _publication_state_root(volume_root) / "ledger.lock"
 
 
 @contextmanager
@@ -1248,6 +1286,7 @@ def _reserve_publication(
     volume_root: Path, profile_key: str, publication_id: str, size: int
 ) -> None:
     _directory(volume_root)
+    reconcile_publication_spools(volume_root)
     with _ledger_lock(volume_root):
         records = _read_ledger(volume_root)
         current = records.get(publication_id)

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from allies_runtime import files
 from allies_runtime.errors import IncomingFileError
 from allies_runtime.files import (
     cleanup_profile_publication_spools,
@@ -233,7 +234,7 @@ def test_publication_freezes_once_outside_the_model_workspace(tmp_path):
 
     release_publication_spool(workspace, publication_id)
     assert not spool.exists()
-    ledger = json.loads((tmp_path / ".allies-publication-ledger.json").read_text())
+    ledger = json.loads(files._ledger_path(tmp_path).read_text())
     assert ledger["records"] == {}
 
 
@@ -301,7 +302,7 @@ def test_publication_ledger_serializes_two_profile_admissions(tmp_path):
         )
 
     assert len(manifests) == 2
-    ledger = json.loads((tmp_path / ".allies-publication-ledger.json").read_text())
+    ledger = json.loads(files._ledger_path(tmp_path).read_text())
     assert len(ledger["records"]) == 2
 
 
@@ -312,7 +313,7 @@ def test_publication_startup_reconciliation_and_stale_copy_cleanup(tmp_path):
     source = workspace / "result.csv"
     source.write_bytes(b"reconcile")
     frozen = freeze_publication(workspace, str(uuid4()), ["result.csv"])
-    ledger_path = tmp_path / ".allies-publication-ledger.json"
+    ledger_path = files._ledger_path(tmp_path)
     ledger = json.loads(ledger_path.read_text())
     del ledger["records"][frozen.publication_id]
     ledger_path.write_text(json.dumps(ledger), encoding="utf-8")

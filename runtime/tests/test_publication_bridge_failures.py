@@ -9,6 +9,8 @@ from uuid import uuid4
 import pytest
 
 import allies_runtime.publication_bridge as bridge_module
+from allies_runtime import files
+from allies_runtime.composition import run_worker
 from allies_runtime.errors import IncomingFileError
 from allies_runtime.files import (
     freeze_publication,
@@ -197,8 +199,8 @@ async def test_bridge_sets_the_root_owned_unix_socket_boundary(tmp_path, monkeyp
     monkeypatch.setattr(bridge_module, "os", fake_os)
     monkeypatch.setattr(bridge_module, "grp", None)
     unavailable = PublicationBridge(object(), object(), tmp_path)
-    with pytest.raises(RuntimeError, match="group is unavailable"):
-        await unavailable.start()
+    assert await unavailable.start() is False
+    assert unavailable._server is None
 
     monkeypatch.setattr(
         bridge_module,
@@ -220,6 +222,63 @@ async def test_bridge_sets_the_root_owned_unix_socket_boundary(tmp_path, monkeyp
     assert any(isinstance(action, tuple) and action[-1] == 0o660 for action in actions)
     assert "close" in actions
     assert "wait_closed" in actions
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(bridge_module.os.name == "nt", reason="POSIX-only bridge")
+@pytest.mark.usefixtures("root_owned_publication_spool")
+async def test_bridge_disables_publication_for_an_invalid_journal_without_stopping_worker(
+    tmp_path,
+):
+    workspace = tmp_path / "profiles" / "ally" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "result.csv").write_bytes(b"content")
+    manifest = freeze_publication(workspace, str(uuid4()), ["result.csv"])
+    journal = files._ledger_path(tmp_path)
+    journal.write_text("{", encoding="utf-8")
+    calls = []
+
+    class Worker:
+        async def run(self, **_kwargs):
+            calls.append("claim")
+            return ("claim",)
+
+    bridge = PublicationBridge(object(), object(), tmp_path)
+    composition = SimpleNamespace(worker=Worker(), publication_bridge=bridge)
+
+    assert await run_worker(composition) == ("claim",)
+    assert calls == ["claim"]
+    assert journal.read_text(encoding="utf-8") == "{"
+    assert (
+        tmp_path / ".allies-publications" / "ally" / manifest.publication_id
+    ).is_dir()
+    assert bridge.activate(_claim()) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(bridge_module.os.name == "nt", reason="POSIX-only bridge")
+@pytest.mark.usefixtures("root_owned_publication_spool")
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+async def test_bridge_disables_publication_for_an_untrusted_root(
+    tmp_path, monkeypatch, kind
+):
+    root = tmp_path / bridge_module.BRIDGE_DIRECTORY
+    if kind == "file":
+        root.write_text("hostile", encoding="utf-8")
+    else:
+        target = tmp_path / "target"
+        target.mkdir()
+        root.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(
+        bridge_module,
+        "grp",
+        SimpleNamespace(getgrnam=lambda _name: SimpleNamespace(gr_gid=10001)),
+    )
+    bridge = PublicationBridge(object(), object(), tmp_path)
+
+    assert await bridge.start() is False
+    assert bridge._server is None
+    assert root.exists() or root.is_symlink()
 
 
 @pytest.mark.asyncio

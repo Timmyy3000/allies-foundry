@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,6 +73,70 @@ def test_publication_spool_rejects_unavailable_root_ownership(tmp_path, monkeypa
         files._publication_spool_root(tmp_path, "ally")
 
 
+@pytest.mark.skipif(files.os.name == "nt", reason="POSIX-only permission boundary")
+def test_publication_ledger_requires_a_protected_parent(tmp_path, monkeypatch):
+    state_root = tmp_path / files._PUBLICATION_STATE_DIRECTORY
+    calls = []
+    original_lstat = Path.lstat
+
+    def lstat(path):
+        if path == tmp_path:
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o1777, st_uid=0, st_gid=0)
+        if path == state_root:
+            if not state_root.exists():
+                raise FileNotFoundError
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(files.os, "chown", lambda *args: calls.append(args))
+    monkeypatch.setattr(files.os, "chmod", lambda *args: calls.append(args))
+
+    assert files._publication_state_root(tmp_path) == state_root
+    assert calls == [(state_root, 0, 0), (state_root, 0o700)]
+
+    state_root.rmdir()
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda path: (
+            SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+            if path == tmp_path
+            else original_lstat(path)
+        ),
+    )
+    with pytest.raises(IncomingFileError, match="journal was unavailable"):
+        files._publication_state_root(tmp_path)
+    assert not state_root.exists()
+
+
+@pytest.mark.skipif(files.os.name == "nt", reason="POSIX-only permission boundary")
+def test_publication_ledger_does_not_promote_existing_untrusted_state(
+    tmp_path, monkeypatch
+):
+    state_root = tmp_path / files._PUBLICATION_STATE_DIRECTORY
+    state_root.mkdir()
+    original_lstat = Path.lstat
+
+    def lstat(path):
+        if path == tmp_path:
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o1777, st_uid=0, st_gid=0)
+        if path == state_root:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700, st_uid=10000, st_gid=10000
+            )
+        return original_lstat(path)
+
+    promoted = []
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(files.os, "chown", lambda *args: promoted.append(args))
+
+    with pytest.raises(IncomingFileError, match="journal was unavailable"):
+        files._publication_state_root(tmp_path)
+
+    assert promoted == []
+
+
 @pytest.mark.usefixtures("root_owned_publication_spool")
 def test_preparation_and_freeze_reject_bad_sources_and_release_reservations(
     tmp_path, monkeypatch
@@ -91,7 +156,7 @@ def test_preparation_and_freeze_reject_bad_sources_and_release_reservations(
     with pytest.raises(IncomingFileError, match="copy rejected"):
         freeze_publication(workspace, str(uuid4()), ["result.csv"])
 
-    ledger = json.loads((tmp_path / ".allies-publication-ledger.json").read_text())
+    ledger = json.loads(files._ledger_path(tmp_path).read_text())
     assert ledger["records"] == {}
 
     monkeypatch.setattr(
@@ -102,12 +167,7 @@ def test_preparation_and_freeze_reject_bad_sources_and_release_reservations(
     with pytest.raises(IncomingFileError, match="could not be committed"):
         freeze_publication(workspace, str(uuid4()), ["result.csv"])
 
-    assert (
-        json.loads((tmp_path / ".allies-publication-ledger.json").read_text())[
-            "records"
-        ]
-        == {}
-    )
+    assert json.loads(files._ledger_path(tmp_path).read_text())["records"] == {}
 
 
 @pytest.mark.usefixtures("root_owned_publication_spool")
@@ -179,9 +239,7 @@ def test_profile_cleanup_removes_only_its_ledger_records(tmp_path):
     assert not (tmp_path / ".allies-publications" / "ally").exists()
     assert (
         manifest.publication_id
-        not in json.loads((tmp_path / ".allies-publication-ledger.json").read_text())[
-            "records"
-        ]
+        not in json.loads(files._ledger_path(tmp_path).read_text())["records"]
     )
 
 
@@ -196,7 +254,7 @@ def test_reconciliation_repairs_a_wrong_ledger_record_and_bounds_invalid_input(
     workspace = _workspace(tmp_path)
     (workspace / "result.csv").write_bytes(b"content")
     manifest = freeze_publication(workspace, str(uuid4()), ["result.csv"])
-    ledger_path = tmp_path / ".allies-publication-ledger.json"
+    ledger_path = files._ledger_path(tmp_path)
     ledger = json.loads(ledger_path.read_text())
     ledger["records"][manifest.publication_id].update(
         profile="wrong-profile", size=1, state="copying"
@@ -212,6 +270,39 @@ def test_reconciliation_repairs_a_wrong_ledger_record_and_bounds_invalid_input(
     assert repaired["state"] == "frozen"
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
+def test_reservation_reconciles_frozen_spools_without_a_legacy_ledger(tmp_path):
+    workspace = _workspace(tmp_path)
+    (workspace / "first.csv").write_bytes(b"first")
+    first = freeze_publication(workspace, str(uuid4()), ["first.csv"])
+    files.shutil.rmtree(tmp_path / files._PUBLICATION_STATE_DIRECTORY)
+    forged_id = str(uuid4())
+    (tmp_path / ".allies-publication-ledger.json").write_text(
+        json.dumps(
+            {
+                "schema": "allies.publication.v1",
+                "records": {
+                    forged_id: {
+                        "profile": "ally",
+                        "size": files.MAX_VOLUME_PUBLICATION_BYTES,
+                        "state": "frozen",
+                        "updated_at": 0,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workspace / "second.csv").write_bytes(b"second")
+    second = freeze_publication(workspace, str(uuid4()), ["second.csv"])
+
+    records = json.loads(files._ledger_path(tmp_path).read_text())["records"]
+    assert set(records) == {first.publication_id, second.publication_id}
+    assert forged_id not in records
+    assert (tmp_path / ".allies-publication-ledger.json").exists()
+
+
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_partial_cleanup_keeps_journaled_work_and_releases_only_deleted_copy_reservations(
     tmp_path,
 ):
@@ -248,10 +339,7 @@ def test_partial_cleanup_keeps_journaled_work_and_releases_only_deleted_copy_res
     assert cleanup_stale_publication_copies(tmp_path, now=24 * 60 * 60 + 1) == 1
     assert not stale.exists()
     assert (
-        journaled_id
-        in json.loads((tmp_path / ".allies-publication-ledger.json").read_text())[
-            "records"
-        ]
+        journaled_id in json.loads(files._ledger_path(tmp_path).read_text())["records"]
     )
 
 
@@ -430,8 +518,9 @@ def test_publication_manifest_reader_rejects_corrupt_durable_journals(tmp_path):
         )
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_ledger_reader_rejects_invalid_reservations(tmp_path):
-    ledger = tmp_path / ".allies-publication-ledger.json"
+    ledger = files._ledger_path(tmp_path)
     cases = [
         "not json",
         {"schema": "v0", "records": {}},
@@ -453,6 +542,7 @@ def test_publication_ledger_reader_rejects_invalid_reservations(tmp_path):
             files._read_ledger(tmp_path)
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_reservation_enforces_each_shared_volume_bound(
     tmp_path, monkeypatch
 ):
@@ -548,12 +638,7 @@ def test_publication_freeze_and_journal_transitions_reject_stale_or_missing_stat
 
     with pytest.raises(IncomingFileError, match="spool state was invalid"):
         freeze_publication(workspace, publication_id, ["result.csv"])
-    assert (
-        json.loads((tmp_path / ".allies-publication-ledger.json").read_text())[
-            "records"
-        ]
-        == {}
-    )
+    assert json.loads(files._ledger_path(tmp_path).read_text())["records"] == {}
 
     files._reserve_publication(tmp_path, "ally", publication_id, 1)
     files._mark_publication_frozen(tmp_path, publication_id)
@@ -706,7 +791,7 @@ def test_reconciliation_completes_an_interrupted_durable_spool_release(
     with pytest.raises(OSError, match="process stopped"):
         release_publication_spool(workspace, manifest.publication_id)
 
-    ledger_path = tmp_path / ".allies-publication-ledger.json"
+    ledger_path = files._ledger_path(tmp_path)
     assert (
         json.loads(ledger_path.read_text())["records"][manifest.publication_id]["state"]
         == "releasing"
@@ -729,7 +814,7 @@ def test_reconciliation_releases_a_completed_spool_before_ledger_cleanup(tmp_pat
     files.shutil.rmtree(tmp_path / ".allies-publications")
 
     assert reconcile_publication_spools(tmp_path) == 0
-    ledger = json.loads((tmp_path / ".allies-publication-ledger.json").read_text())
+    ledger = json.loads(files._ledger_path(tmp_path).read_text())
     assert ledger["records"] == {}
 
 
@@ -747,6 +832,7 @@ def test_reconciliation_releases_a_completed_spool_before_ledger_cleanup(tmp_pat
         ("ally", "/outside"),
     ],
 )
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_cleanup_rejects_forged_ledger_paths(
     tmp_path, monkeypatch, state, profile, publication_id
 ):

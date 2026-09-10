@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,7 @@ class PublicationBridge:
         self._sessions: dict[str, _Session] = {}
         self._server: asyncio.AbstractServer | None = None
         self._last_partial_cleanup: float | None = None
+        self._available = True
 
     @property
     def socket_path(self) -> Path:
@@ -73,7 +75,9 @@ class PublicationBridge:
 
     def activate(
         self, claim: Any, *, cancelled: Callable[[], bool] | None = None
-    ) -> str:
+    ) -> str | None:
+        if not self._available:
+            return None
         nonce = os.urandom(32).hex()
         self._sessions[nonce] = _Session(
             attempt_id=str(claim.attempt_id),
@@ -88,35 +92,57 @@ class PublicationBridge:
     def deactivate(self, nonce: str) -> None:
         self._sessions.pop(nonce, None)
 
-    async def start(self) -> None:
+    async def start(self) -> bool:
+        self._available = False
         if os.name == "nt":
-            return
-        await asyncio.to_thread(reconcile_publication_spools, self._volume_root)
-        await asyncio.to_thread(cleanup_stale_publication_copies, self._volume_root)
-        self._last_partial_cleanup = asyncio.get_running_loop().time()
-        self._root.mkdir(mode=0o750, parents=True, exist_ok=True)
+            return False
         try:
+            await asyncio.to_thread(reconcile_publication_spools, self._volume_root)
+            await asyncio.to_thread(cleanup_stale_publication_copies, self._volume_root)
+            self._last_partial_cleanup = asyncio.get_running_loop().time()
             if grp is None:
                 raise KeyError(BRIDGE_GROUP)
             group_id = grp.getgrnam(BRIDGE_GROUP).gr_gid
-            os.chown(self._root, 0, group_id)
-        except (KeyError, OSError) as exc:
-            raise RuntimeError("publication bridge group is unavailable") from exc
-        os.chmod(self._root, 0o750)
-        self.socket_path.unlink(missing_ok=True)
-        self._server = await asyncio.start_unix_server(
-            self._handle, self.socket_path, limit=MAX_REQUEST_BYTES
-        )
-        os.chown(self.socket_path, 0, group_id)
-        os.chmod(self.socket_path, 0o660)
+            try:
+                root_metadata = self._root.lstat()
+            except FileNotFoundError:
+                self._root.mkdir(mode=0o750)
+                os.chown(self._root, 0, group_id)
+                os.chmod(self._root, 0o750)
+            else:
+                if (
+                    stat.S_ISLNK(root_metadata.st_mode)
+                    or not stat.S_ISDIR(root_metadata.st_mode)
+                    or root_metadata.st_uid != 0
+                    or root_metadata.st_gid != group_id
+                    or stat.S_IMODE(root_metadata.st_mode) != 0o750
+                ):
+                    raise IncomingFileError("publication bridge was unavailable")
+            self.socket_path.unlink(missing_ok=True)
+            self._server = await asyncio.start_unix_server(
+                self._handle, self.socket_path, limit=MAX_REQUEST_BYTES
+            )
+            os.chown(self.socket_path, 0, group_id)
+            os.chmod(self.socket_path, 0o660)
+        except (IncomingFileError, KeyError, OSError):
+            await self._stop_server()
+            self._sessions.clear()
+            return False
+        self._available = True
+        return True
 
     async def close(self) -> None:
+        self._available = False
+        await self._stop_server()
+        if self._root.exists() and not self._root.is_symlink() and self._root.is_dir():
+            self.socket_path.unlink(missing_ok=True)
+        self._sessions.clear()
+
+    async def _stop_server(self) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        self.socket_path.unlink(missing_ok=True)
-        self._sessions.clear()
 
     async def publish(
         self, context: str, tool_call_id: str, paths: Sequence[str]
@@ -246,6 +272,8 @@ class PublicationBridge:
     async def recover(self, profile_id: str, profile_key: str, limit: int = 20) -> None:
         """Resume frozen work from the original intent without a model call."""
 
+        if not self._available:
+            return
         now = asyncio.get_running_loop().time()
         if self._last_partial_cleanup is None or now - self._last_partial_cleanup >= 60:
             await asyncio.to_thread(cleanup_stale_publication_copies, self._volume_root)
