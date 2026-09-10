@@ -42,6 +42,37 @@ def _descriptor(content: bytes = b"content"):
     }
 
 
+@pytest.mark.skipif(files.os.name == "nt", reason="POSIX-only permission boundary")
+def test_publication_spool_requires_root_owned_permissions(tmp_path, monkeypatch):
+    actions = []
+    root = tmp_path / ".allies-publications"
+    spool = root / "ally"
+
+    monkeypatch.setattr(files.os, "chown", lambda *args: actions.append(args))
+    monkeypatch.setattr(files.os, "chmod", lambda *args: actions.append(args))
+
+    assert files._publication_spool_root(tmp_path, "ally") == spool
+    assert actions == [
+        (root, 0, 0),
+        (spool, 0, 0),
+        (root, 0o700),
+        (spool, 0o700),
+    ]
+
+
+@pytest.mark.skipif(files.os.name == "nt", reason="POSIX-only permission boundary")
+def test_publication_spool_rejects_unavailable_root_ownership(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        files.os,
+        "chown",
+        lambda *_args: (_ for _ in ()).throw(OSError("operation not permitted")),
+    )
+
+    with pytest.raises(IncomingFileError, match="publication spool was unavailable"):
+        files._publication_spool_root(tmp_path, "ally")
+
+
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_preparation_and_freeze_reject_bad_sources_and_release_reservations(
     tmp_path, monkeypatch
 ):
@@ -74,6 +105,7 @@ def test_preparation_and_freeze_reject_bad_sources_and_release_reservations(
     assert json.loads((tmp_path / ".allies-publication-ledger.json").read_text())["records"] == {}
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_spool_paths_reject_missing_or_unsafe_state_and_release_is_idempotent(tmp_path):
     workspace = _workspace(tmp_path)
     (workspace / "result.csv").write_bytes(b"content")
@@ -102,6 +134,7 @@ def test_spool_paths_reject_missing_or_unsafe_state_and_release_is_idempotent(tm
         release_publication_spool(workspace, unsafe.publication_id)
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_recovery_scans_bounded_valid_manifests_and_rejects_unsafe_roots(tmp_path):
     workspace = _workspace(tmp_path)
     assert recover_publication_manifests(workspace) == ()
@@ -127,6 +160,7 @@ def test_recovery_scans_bounded_valid_manifests_and_rejects_unsafe_roots(tmp_pat
         recover_publication_manifests(unsafe_root)
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_profile_cleanup_removes_only_its_ledger_records(tmp_path):
     workspace = _workspace(tmp_path, "ally")
     (workspace / "result.csv").write_bytes(b"content")
@@ -143,6 +177,7 @@ def test_profile_cleanup_removes_only_its_ledger_records(tmp_path):
     )["records"]
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_reconciliation_repairs_a_wrong_ledger_record_and_bounds_invalid_input(tmp_path):
     assert reconcile_publication_spools(tmp_path) == 0
     with pytest.raises(IncomingFileError, match="limit"):
@@ -324,6 +359,7 @@ def test_publication_copy_checks_paths_and_detects_source_changes(tmp_path, monk
     assert not list(destination.iterdir())
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_manifest_reader_rejects_corrupt_durable_journals(tmp_path):
     workspace = _workspace(tmp_path)
     (workspace / "result.csv").write_bytes(b"content")
@@ -445,6 +481,7 @@ def test_publication_reservation_enforces_each_shared_volume_bound(tmp_path, mon
         files._reserve_publication(free_space_root, "ally", "new", 1)
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_spool_safety_checks_reject_unsafe_cleanup_and_bad_inputs(
     tmp_path, monkeypatch
 ):
@@ -467,6 +504,7 @@ def test_publication_spool_safety_checks_reject_unsafe_cleanup_and_bad_inputs(
         cleanup_stale_publication_copies(tmp_path)
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_freeze_and_journal_transitions_reject_stale_or_missing_state(
     tmp_path,
 ):
@@ -611,6 +649,7 @@ def test_publication_copy_and_reservation_helpers_fence_unavailable_state(
         files._check_deadline(0, lambda: 2, 1)
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_reconciliation_completes_an_interrupted_durable_spool_release(
     tmp_path, monkeypatch
 ):
@@ -641,6 +680,7 @@ def test_reconciliation_completes_an_interrupted_durable_spool_release(
     assert json.loads(ledger_path.read_text())["records"] == {}
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_reconciliation_releases_a_completed_spool_before_ledger_cleanup(tmp_path):
     workspace = _workspace(tmp_path)
     (workspace / "result.csv").write_bytes(b"content")

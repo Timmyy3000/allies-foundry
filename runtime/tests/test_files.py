@@ -209,6 +209,7 @@ def test_hermes_context_uses_utf8_without_ascii_escape_expansion():
     assert len(encoded) < 16 * 1024
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_freezes_once_outside_the_model_workspace(tmp_path):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -235,6 +236,7 @@ def test_publication_freezes_once_outside_the_model_workspace(tmp_path):
     assert ledger["records"] == {}
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_rejects_links_and_profile_cleanup_is_scoped(tmp_path):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -278,6 +280,7 @@ def test_publication_rejects_links_and_profile_cleanup_is_scoped(tmp_path):
     )
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_ledger_serializes_two_profile_admissions(tmp_path):
     workspaces = []
     for profile in ("ally-a", "ally-b"):
@@ -301,6 +304,7 @@ def test_publication_ledger_serializes_two_profile_admissions(tmp_path):
     assert len(ledger["records"]) == 2
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_startup_reconciliation_and_stale_copy_cleanup(tmp_path):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -334,6 +338,7 @@ def test_publication_startup_reconciliation_and_stale_copy_cleanup(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_publication_bridge_waits_for_cloud_ready_without_a_model_call(
     tmp_path, monkeypatch
 ):
@@ -469,6 +474,7 @@ async def test_publication_bridge_waits_for_cloud_ready_without_a_model_call(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_publication_bridge_stops_polling_when_lease_is_lost(
     tmp_path, monkeypatch
 ):
@@ -592,6 +598,7 @@ async def test_lost_intent_acknowledgement_cannot_create_a_spool(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_recovery_reuses_frozen_bytes_after_the_workspace_changes(tmp_path):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -625,6 +632,7 @@ async def test_recovery_reuses_frozen_bytes_after_the_workspace_changes(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_publication_recovery_skips_cloud_ready_rows(tmp_path):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)

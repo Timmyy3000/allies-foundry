@@ -145,9 +145,10 @@ async def test_bridge_private_protocol_bounds_bad_and_large_responses(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bridge_start_is_safe_without_unix_socket_support(tmp_path):
+async def test_bridge_start_is_safe_without_unix_socket_support(tmp_path, monkeypatch):
     bridge = PublicationBridge(object(), object(), tmp_path)
     context = bridge.activate(_claim())
+    monkeypatch.setattr(bridge_module, "os", SimpleNamespace(name="nt"))
 
     await bridge.start()
     await bridge.close()
@@ -486,6 +487,7 @@ async def test_bridge_stops_after_a_validating_poll_reaches_its_deadline(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_bridge_keeps_the_frozen_spool_when_context_is_revoked_after_register(
     tmp_path,
 ):
@@ -605,6 +607,7 @@ def test_bridge_rejects_malformed_cloud_rows_and_ready_links():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_recovery_retains_spools_for_failed_acknowledgements_and_claims(tmp_path):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -630,6 +633,7 @@ async def test_recovery_retains_spools_for_failed_acknowledgements_and_claims(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_recovery_releases_a_spool_only_after_a_ready_cloud_receipt(tmp_path):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -687,6 +691,7 @@ async def test_recovery_releases_a_spool_only_after_a_ready_cloud_receipt(tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_recovery_keeps_a_spool_when_a_reclaimed_upload_fails(tmp_path):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -735,6 +740,7 @@ async def test_recovery_keeps_a_spool_when_a_reclaimed_upload_fails(tmp_path):
 @pytest.mark.parametrize(
     "spool_state", ["missing", "corrupt", "unreadable", "changed_bytes"]
 )
+@pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_recovery_reports_unavailable_spools_with_the_claim_fence(
     tmp_path, monkeypatch, spool_state
 ):
