@@ -31,6 +31,7 @@ from allies_runtime.foundry import (
     TerminalReceipt,
 )
 from allies_runtime.hermes import HermesEvent, _stream_request_body
+from allies_runtime.profile_store import ProfileStoreError
 from allies_runtime.publication_bridge import PublicationBridge
 
 
@@ -703,7 +704,10 @@ async def test_publication_recovery_skips_cloud_ready_rows(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_publication_recovery_rotates_one_bounded_profile_without_a_model_call():
+@pytest.mark.parametrize("removed_profile", [False, True])
+async def test_publication_recovery_rotates_one_bounded_profile_without_a_model_call(
+    removed_profile,
+):
     calls = []
     now = 0.0
     active = asyncio.Event()
@@ -711,6 +715,8 @@ async def test_publication_recovery_rotates_one_bounded_profile_without_a_model_
     class Bridge:
         async def recover(self, profile_id, profile_key, *, limit):
             calls.append((profile_id, profile_key, limit))
+            if removed_profile and profile_key == "a":
+                raise ProfileStoreError("profile removed")
 
     def clock():
         return now

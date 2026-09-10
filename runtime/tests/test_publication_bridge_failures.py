@@ -16,6 +16,7 @@ from allies_runtime.files import (
     publication_spool_path,
 )
 from allies_runtime.foundry import FoundryClaim, FoundryError
+from allies_runtime.profile_store import ProfileStoreError
 from allies_runtime.publication_bridge import (
     MAX_RESPONSE_BYTES,
     PublicationBridge,
@@ -104,6 +105,22 @@ async def test_bridge_rejects_invalid_call_id_from_an_active_session(tmp_path):
         "state": "failed",
         "retryable": True,
         "error_code": "publication_request_invalid",
+    }
+
+
+@pytest.mark.asyncio
+async def test_removed_profile_does_not_break_recovery_or_tool_response(tmp_path):
+    class RemovedStore:
+        def workspace_path(self, _profile_key):
+            raise ProfileStoreError("profile removed")
+
+    bridge = PublicationBridge(object(), RemovedStore(), tmp_path)
+    await bridge.recover(str(uuid4()), "removed")
+    context = bridge.activate(_claim("removed"))
+    assert await bridge.publish(context, "call-1", ["result.csv"]) == {
+        "state": "failed",
+        "retryable": True,
+        "error_code": "publication_unavailable",
     }
 
 

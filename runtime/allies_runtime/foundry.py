@@ -43,6 +43,7 @@ from .observability import (
     emit_runtime_event,
     observe_runtime_operation,
 )
+from .profile_store import ProfileStoreError
 
 MAX_CLAIM_SLOTS = 8
 # Sequence 100001 is reserved for the single terminal event emitted when the
@@ -3157,7 +3158,13 @@ class FoundryWorker:
         self._publication_profile_cursor = profile_id
         try:
             await bridge.recover(profile_id, profile_key, limit=20)
-        except (FoundryError, IncomingFileError, OSError, ValueError):
+        except (
+            FoundryError,
+            IncomingFileError,
+            ProfileStoreError,
+            OSError,
+            ValueError,
+        ):
             return
 
     async def _reconcile_profiles(self, *, force: bool = False) -> None:

@@ -29,6 +29,7 @@ from .files import (
     release_publication_spool,
 )
 from .foundry import FoundryError
+from .profile_store import ProfileStoreError
 
 BRIDGE_DIRECTORY = ".allies-publication-bridge"
 BRIDGE_SOCKET_NAME = "socket"
@@ -192,7 +193,14 @@ class PublicationBridge:
             result = await self._wait_for_ready(
                 context, session, publication_id, deadline
             )
-        except (FoundryError, IncomingFileError, OSError, TypeError, ValueError):
+        except (
+            FoundryError,
+            IncomingFileError,
+            ProfileStoreError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
             return _failed("publication_unavailable", publication_id)
         if result.get("state") == "ready":
             try:
@@ -242,7 +250,10 @@ class PublicationBridge:
         if self._last_partial_cleanup is None or now - self._last_partial_cleanup >= 60:
             await asyncio.to_thread(cleanup_stale_publication_copies, self._volume_root)
             self._last_partial_cleanup = now
-        workspace = self._profile_store.workspace_path(profile_key)
+        try:
+            workspace = self._profile_store.workspace_path(profile_key)
+        except ProfileStoreError:
+            return
         try:
             manifests = await asyncio.to_thread(
                 recover_publication_manifests, workspace, limit
