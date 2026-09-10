@@ -80,6 +80,15 @@ ACTIVITY_KINDS = frozenset(
         "skill_manage",
         "todo",
         "cronjob",
+        "routine_create",
+        "routine_list",
+        "routine_inspect",
+        "routine_update",
+        "routine_pause",
+        "routine_resume",
+        "routine_request_delete",
+        "routine_delete",
+        "routine_result",
         "delegate_task",
         "unknown",
     }
@@ -578,10 +587,10 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
             if not isinstance(tool_call, Mapping):
                 continue
             function = tool_call.get("function")
-            if (
-                not isinstance(function, Mapping)
-                or function.get("name") != _ROUTINE_RESULT_TOOL
-            ):
+            if not isinstance(function, Mapping) or function.get("name") not in {
+                _ROUTINE_RESULT_TOOL,
+                "tool_call",
+            }:
                 continue
             call_id = tool_call.get("id")
             if not isinstance(call_id, str) or not _TOOL_CALL_ID.fullmatch(call_id):
@@ -603,6 +612,32 @@ def _routine_result_from_transcript(messages: list[Any]) -> dict[str, Any] | Non
                 raise HermesMalformedResponse(
                     "Hermes routine result tool arguments were not JSON"
                 ) from exc
+            if function.get("name") == "tool_call":
+                if (
+                    not isinstance(decoded, Mapping)
+                    or decoded.get("name") != _ROUTINE_RESULT_TOOL
+                ):
+                    continue
+                # A rejected wrapper never invoked the result tool and may be retried.
+                responses = [
+                    item
+                    for item in messages
+                    if isinstance(item, Mapping)
+                    and item.get("role") == "tool"
+                    and item.get("tool_call_id") == call_id
+                ]
+                if len(responses) == 1 and responses[0].get("tool_name") == "tool_call":
+                    try:
+                        rejected = json.loads(responses[0].get("content", ""))
+                    except (TypeError, json.JSONDecodeError):
+                        rejected = None
+                    if (
+                        isinstance(rejected, Mapping)
+                        and "error" in rejected
+                        and "status" not in rejected
+                    ):
+                        continue
+                decoded = decoded.get("arguments")
             calls.append((message_index, call_index, call_id, decoded))
 
     if not calls:
