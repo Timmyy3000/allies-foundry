@@ -133,7 +133,7 @@ RUN /opt/hermes/.venv/bin/python /tmp/allies-smoke-incoming-file-context.py \
     && rm -f /tmp/allies-smoke-incoming-file-context.py
 RUN /opt/hermes/.venv/bin/python /tmp/allies-smoke-routine-result-tool.py \
     && rm -f /tmp/allies-smoke-routine-result-tool.py
-RUN /opt/hermes/.venv/bin/python /tmp/allies-smoke-file-publication-tool.py \
+RUN PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python /tmp/allies-smoke-file-publication-tool.py \
     && rm -f /tmp/allies-smoke-file-publication-tool.py
 
 LABEL org.opencontainers.image.title="Allies Hermes with Mnemosyne" \
