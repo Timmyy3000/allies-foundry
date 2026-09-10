@@ -57,6 +57,7 @@ from runtime.services.profiles import (
     list_profile_reconciliation,
 )
 from runtime.services.publications import (
+    MAX_PUBLICATION_FILE_BYTES,
     acknowledge_frozen_publication,
     claim_publication_retries,
     create_publication_intent,
@@ -325,7 +326,7 @@ def register(api: NinjaExtraAPI) -> None:
                 publication_id,
                 file_id,
                 generation,
-                request.body,
+                request.read(MAX_PUBLICATION_FILE_BYTES + 1),
                 revision_value,
                 lease_token,
             )

@@ -339,8 +339,9 @@ def test_publication_startup_reconciliation_and_stale_copy_cleanup(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("root_owned_publication_spool")
+@pytest.mark.parametrize("cleanup_error", [None, OSError, IncomingFileError])
 async def test_publication_bridge_waits_for_cloud_ready_without_a_model_call(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, cleanup_error
 ):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -358,6 +359,14 @@ async def test_publication_bridge_waits_for_cloud_ready_without_a_model_call(
         return None
 
     monkeypatch.setattr("allies_runtime.publication_bridge.asyncio.sleep", no_sleep)
+    if cleanup_error is not None:
+
+        def fail_release(*_args):
+            raise cleanup_error("cleanup unavailable")
+
+        monkeypatch.setattr(
+            "allies_runtime.publication_bridge.release_publication_spool", fail_release
+        )
 
     class ProfileStore:
         def workspace_path(self, profile_key):

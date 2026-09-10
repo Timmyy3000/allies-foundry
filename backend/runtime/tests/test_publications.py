@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from uuid import uuid4
 
 import pytest
@@ -35,6 +36,41 @@ from runtime.services.runtime_auth import (
     authenticate_runtime_token,
     issue_runtime_credential,
 )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("size", [3_000_000, 25_000_000, 30_000_000])
+def test_publication_upload_api_reads_the_bounded_binary_body(
+    publication_claim, client, monkeypatch, size
+):
+    _context, _claim, profile, _execution, token = publication_claim
+    received = []
+
+    def receive(*args):
+        content = args[5]
+        received.append(len(content))
+        if len(content) > publication_service.MAX_PUBLICATION_FILE_BYTES:
+            return publication_service.upload_publication_file(*args)
+        return 202, {"state": "validating"}
+
+    monkeypatch.setattr(
+        importlib.import_module("runtime.api.register"),
+        "upload_publication_file",
+        receive,
+    )
+    path = (
+        f"/api/v1/runtime/profiles/{profile.id}/file-publications/{uuid4()}"
+        f"/files/{uuid4()}/content?generation=1"
+    )
+    response = client.put(
+        path,
+        b"x" * size,
+        content_type="application/octet-stream",
+        HTTP_AUTHORIZATION=f"Bearer {token}",
+        HTTP_X_ALLIES_PUBLICATION_REVISION="1",
+    )
+    assert response.status_code == (202 if size <= 25_000_000 else 422)
+    assert received == [min(size, 25_000_001)]
 
 
 @pytest.fixture

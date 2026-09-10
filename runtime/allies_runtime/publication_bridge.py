@@ -195,9 +195,12 @@ class PublicationBridge:
         except (FoundryError, IncomingFileError, OSError, TypeError, ValueError):
             return _failed("publication_unavailable", publication_id)
         if result.get("state") == "ready":
-            await asyncio.to_thread(
-                release_publication_spool, workspace, publication_id
-            )
+            try:
+                await asyncio.to_thread(
+                    release_publication_spool, workspace, publication_id
+                )
+            except (IncomingFileError, OSError):
+                pass
         return result
 
     async def _wait_for_ready(
