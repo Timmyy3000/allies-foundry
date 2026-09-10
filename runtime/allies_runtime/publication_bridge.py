@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover - exercised by Windows test imports
 
 from .errors import IncomingFileError
 from .files import (
+    _validate_publication_volume_root,
     cleanup_stale_publication_copies,
     freeze_publication,
     prepare_publication_files,
@@ -97,6 +98,9 @@ class PublicationBridge:
         if os.name == "nt":
             return False
         try:
+            await asyncio.to_thread(
+                _validate_publication_volume_root, self._volume_root
+            )
             await asyncio.to_thread(reconcile_publication_spools, self._volume_root)
             await asyncio.to_thread(cleanup_stale_publication_copies, self._volume_root)
             self._last_partial_cleanup = asyncio.get_running_loop().time()

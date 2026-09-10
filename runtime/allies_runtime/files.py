@@ -1201,21 +1201,32 @@ def _write_publication_manifest(
     _write_receipt(path, value)
 
 
+def _validate_publication_volume_root(volume_root: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        metadata = volume_root.lstat()
+    except OSError:
+        raise IncomingFileError(
+            "publication reservation journal was unavailable"
+        ) from None
+    if (
+        volume_root.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o1777
+    ):
+        raise IncomingFileError("publication reservation journal was unavailable")
+
+
 def _publication_state_root(volume_root: Path) -> Path:
     root = volume_root / _PUBLICATION_STATE_DIRECTORY
     if os.name == "nt":
         _directory(root)
         return root
     try:
-        volume_metadata = volume_root.lstat()
-        if (
-            volume_root.is_symlink()
-            or not stat.S_ISDIR(volume_metadata.st_mode)
-            or volume_metadata.st_uid != 0
-            or volume_metadata.st_gid != 0
-            or stat.S_IMODE(volume_metadata.st_mode) != 0o1777
-        ):
-            raise IncomingFileError("publication reservation journal was unavailable")
+        _validate_publication_volume_root(volume_root)
         try:
             metadata = root.lstat()
         except FileNotFoundError:

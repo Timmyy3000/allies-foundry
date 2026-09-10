@@ -214,6 +214,9 @@ async def test_bridge_sets_the_root_owned_unix_socket_boundary(tmp_path, monkeyp
         "grp",
         SimpleNamespace(getgrnam=lambda name: SimpleNamespace(gr_gid=10001)),
     )
+    monkeypatch.setattr(
+        bridge_module, "_validate_publication_volume_root", lambda _root: None
+    )
     monkeypatch.setattr(bridge_module, "reconcile_publication_spools", lambda _root: 0)
     monkeypatch.setattr(
         bridge_module, "cleanup_stale_publication_copies", lambda _root: 0
@@ -254,6 +257,9 @@ async def test_bridge_disables_publication_for_an_invalid_journal_without_stoppi
             name="posix", chown=lambda *_args: None, chmod=lambda *_args: None
         ),
     )
+    monkeypatch.setattr(
+        bridge_module, "_validate_publication_volume_root", lambda _root: None
+    )
     calls = []
 
     class Worker:
@@ -271,6 +277,44 @@ async def test_bridge_disables_publication_for_an_invalid_journal_without_stoppi
         tmp_path / ".allies-publications" / "ally" / manifest.publication_id
     ).is_dir()
     assert bridge.activate(_claim()) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode, owner", [(0o1777, 10000), (0o755, 0)])
+async def test_bridge_rejects_an_empty_untrusted_volume_without_stopping_worker(
+    tmp_path, monkeypatch, mode, owner
+):
+    original_lstat = Path.lstat
+    monkeypatch.setattr(files, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(bridge_module, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda path: (
+            SimpleNamespace(
+                st_mode=bridge_module.stat.S_IFDIR | mode,
+                st_uid=owner,
+                st_gid=owner,
+            )
+            if path == tmp_path
+            else original_lstat(path)
+        ),
+    )
+    calls = []
+
+    class Worker:
+        async def run(self, **_kwargs):
+            calls.append("claim")
+            return ("claim",)
+
+    bridge = PublicationBridge(object(), object(), tmp_path)
+    composition = SimpleNamespace(worker=Worker(), publication_bridge=bridge)
+
+    assert await run_worker(composition) == ("claim",)
+    assert calls == ["claim"]
+    assert bridge.activate(_claim()) is None
+    assert not (tmp_path / files._PUBLICATION_STATE_DIRECTORY).exists()
+    assert not bridge.socket_path.exists()
 
 
 @pytest.mark.asyncio
@@ -310,6 +354,9 @@ async def test_bridge_disables_publication_for_an_untrusted_root(
         SimpleNamespace(
             name="posix", chown=lambda *_args: None, chmod=lambda *_args: None
         ),
+    )
+    monkeypatch.setattr(
+        bridge_module, "_validate_publication_volume_root", lambda _root: None
     )
     bridge = PublicationBridge(object(), object(), tmp_path)
 
