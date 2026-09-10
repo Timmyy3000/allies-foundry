@@ -31,8 +31,7 @@ attempt=0
 while [ "$attempt" -lt 60 ]; do
     if docker exec --user 10000 "$container" \
         sh -ec 'test "$(cat /opt/data/.allies-boot-smoke)" = ready' 2>/dev/null; then
-        echo "Fresh-volume initialization and non-root service execution passed."
-        exit 0
+        break
     fi
     if [ "$(docker inspect --format '{{.State.Running}}' "$container")" != true ]; then
         break
