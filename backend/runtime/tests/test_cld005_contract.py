@@ -1176,8 +1176,8 @@ def test_event_delivery_command_bounds_power_work_around_delivery(monkeypatch):
     command_path = "runtime.management.commands.publish_event_deliveries"
     monkeypatch.setattr(
         f"{command_path}.wake_due_publications",
-        lambda *, limit: calls.append(("publication", limit))
-        or type("Publication", (), {"woken": 0})(),
+        lambda *, limit, cursor: calls.append(("publication", limit, cursor))
+        or type("Publication", (), {"woken": 0, "next_cursor": None})(),
     )
     monkeypatch.setattr(
         f"{command_path}.process_runtime_wakes",
@@ -1209,7 +1209,7 @@ def test_event_delivery_command_bounds_power_work_around_delivery(monkeypatch):
     call_command("publish_event_deliveries", stdout=output)
 
     assert calls == [
-        ("publication", 20),
+        ("publication", 20, None),
         ("wake", 1),
         ("delivery", 1),
         ("cleanup", None),
@@ -1217,3 +1217,37 @@ def test_event_delivery_command_bounds_power_work_around_delivery(monkeypatch):
     ]
     assert "wake unavailable 1" in output.getvalue()
     assert "idle unavailable 2" in output.getvalue()
+
+
+def test_event_delivery_command_keeps_publication_wake_cursor_across_watch_passes(
+    monkeypatch,
+):
+    command_path = "runtime.management.commands.publish_event_deliveries"
+    cursors = []
+
+    def wake_publications(*, limit, cursor):
+        cursors.append((limit, cursor))
+        return type(
+            "Publication",
+            (),
+            {"woken": 1, "next_cursor": "second-page" if cursor is None else None},
+        )()
+
+    monkeypatch.setattr(f"{command_path}.wake_due_publications", wake_publications)
+    monkeypatch.setattr(
+        f"{command_path}.process_runtime_wakes",
+        lambda *, limit: type("Wake", (), {"started": 0, "failed": 0, "unavailable": 0})(),
+    )
+    monkeypatch.setattr(
+        f"{command_path}.publish_pending_event_deliveries",
+        lambda *, limit: event_delivery.DeliveryReport(delivered=0),
+    )
+    monkeypatch.setattr(f"{command_path}.cleanup_runtime_intents", lambda: 0)
+    monkeypatch.setattr(
+        f"{command_path}.stop_idle_workspaces",
+        lambda *, limit: type("Idle", (), {"stopped": 0, "unavailable": 0})(),
+    )
+
+    call_command("publish_event_deliveries", "--watch", "--max-runs", "2")
+
+    assert cursors == [(20, None), (20, "second-page")]

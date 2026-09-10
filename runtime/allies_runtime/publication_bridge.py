@@ -298,7 +298,7 @@ class PublicationBridge:
                     profile_id, publication_id, revision, lease_token, "submitted"
                 )
                 view = await self._foundry.get_publication(profile_id, publication_id)
-                if _ready_view(view).get("state") == "ready":
+                if _ready_view(view, publication_id).get("state") == "ready":
                     await asyncio.to_thread(
                         release_publication_spool, workspace, publication_id
                     )

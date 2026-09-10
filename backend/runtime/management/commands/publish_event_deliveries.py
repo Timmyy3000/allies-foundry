@@ -39,6 +39,7 @@ class Command(BaseCommand):
         watch = options["watch"]
         interval = options["interval"]
         max_runs = options["max_runs"]
+        self._publication_cursor = None
         if not watch:
             if interval is not None or max_runs is not None:
                 raise CommandError("--interval and --max-runs require --watch")
@@ -59,7 +60,10 @@ class Command(BaseCommand):
 
     def _run_once(self):
         try:
-            publication_wakes = wake_due_publications(limit=20)
+            publication_wakes = wake_due_publications(
+                limit=20, cursor=self._publication_cursor
+            )
+            self._publication_cursor = publication_wakes.next_cursor
         except Exception as exc:  # noqa: BLE001 - recovery wake cannot halt delivery
             publication_wakes = None
             self.stderr.write(f"Publication wake pass failed: {type(exc).__name__}")

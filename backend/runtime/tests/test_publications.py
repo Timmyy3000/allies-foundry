@@ -24,7 +24,6 @@ from runtime.services.claims import claim_next_execution
 from runtime.services.publications import (
     acknowledge_frozen_publication,
     create_publication_intent,
-    list_publication_intents,
     register_publication,
     wake_due_publications,
 )
@@ -164,27 +163,6 @@ def test_intent_api_replays_the_same_tool_identity(publication_claim, client):
     )
     assert frozen.status_code == 200
     assert frozen.json()["state"] == "frozen"
-
-
-@pytest.mark.django_db
-@override_settings(ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED=True)
-def test_intent_recovery_pages_without_skipping_the_boundary(publication_claim):
-    context, claim, profile, _execution, _token = publication_claim
-    for index in range(21):
-        create_publication_intent(
-            context,
-            claim.attempt_id,
-            claim.lease_token,
-            f"call-{index}",
-            [{"name": "result.csv", "size": 12}],
-        )
-
-    first = list_publication_intents(context, profile.id, 20)
-    second = list_publication_intents(context, profile.id, 20, first.next_cursor)
-
-    assert len(first.items) == 20
-    assert first.next_cursor == first.items[-1].publication_id
-    assert len(second.items) == 1
 
 
 @pytest.mark.django_db

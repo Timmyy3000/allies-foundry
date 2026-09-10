@@ -1706,7 +1706,6 @@ class FoundryWorker:
         profile_store: Any | None = None,
         file_input_enabled: bool = False,
         publication_bridge: Any | None = None,
-        publication_recovery_interval: float = DEFAULT_PUBLICATION_RECOVERY_INTERVAL,
     ):
         if (
             isinstance(slots, bool)
@@ -1734,8 +1733,6 @@ class FoundryWorker:
             raise ValueError("approval poll interval must be between 0 and 5")
         if not isinstance(file_input_enabled, bool):
             raise TypeError("file input enabled must be a boolean")
-        if publication_recovery_interval <= 0:
-            raise ValueError("publication recovery interval must be positive")
         self.foundry = foundry
         self.hermes = hermes
         self.slots = slots
@@ -1757,7 +1754,6 @@ class FoundryWorker:
         self._profile_store = profile_store
         self._file_input_enabled = file_input_enabled
         self._publication_bridge = publication_bridge
-        self._publication_recovery_interval = publication_recovery_interval
         self._last_publication_recovery: float | None = None
         self._publication_profile_cursor: str | None = None
         self._activity_revision = 0
@@ -3133,7 +3129,7 @@ class FoundryWorker:
             bridge is None
             or self._last_publication_recovery is not None
             and now - self._last_publication_recovery
-            < self._publication_recovery_interval
+            < DEFAULT_PUBLICATION_RECOVERY_INTERVAL
         ):
             return
         profiles = sorted(

@@ -61,7 +61,6 @@ from runtime.services.publications import (
     claim_publication_retries,
     create_publication_intent,
     get_publication,
-    list_publication_intents,
     record_publication_retry,
     register_publication,
     upload_publication_file,
@@ -276,32 +275,6 @@ def register(api: NinjaExtraAPI) -> None:
             )
             return JsonResponse(
                 {"publication_id": str(receipt.publication_id), "state": receipt.state},
-                status=200,
-            )
-        except RuntimeDomainError as exc:
-            return _error(exc)
-
-    @api.get("/runtime/profiles/{profile_id}/file-publication-intents", auth=None)
-    def publication_intents(
-        request: HttpRequest,
-        profile_id: UUID,
-        limit: int = 20,
-        cursor: UUID | None = None,
-    ):
-        try:
-            context = authenticate_runtime_token(_bearer(request))
-            page = list_publication_intents(context, profile_id, limit, cursor)
-            return JsonResponse(
-                {
-                    "items": [
-                        {
-                            "publication_id": str(item.publication_id),
-                            "state": item.state,
-                        }
-                        for item in page.items
-                    ],
-                    "next_cursor": str(page.next_cursor) if page.next_cursor else None,
-                },
                 status=200,
             )
         except RuntimeDomainError as exc:

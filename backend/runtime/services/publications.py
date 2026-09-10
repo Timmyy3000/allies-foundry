@@ -65,12 +65,6 @@ class PublicationIntentReceipt:
 
 
 @dataclass(frozen=True, slots=True)
-class PublicationIntentPage:
-    items: tuple[PublicationIntentReceipt, ...]
-    next_cursor: UUID | None
-
-
-@dataclass(frozen=True, slots=True)
 class PublicationWakePage:
     woken: int
     next_cursor: str | None
@@ -178,54 +172,6 @@ def acknowledge_frozen_publication(
     return receipt
 
 
-def list_publication_intents(
-    context: RuntimeContext,
-    profile_id: UUID,
-    limit: int,
-    cursor: UUID | None = None,
-) -> PublicationIntentPage:
-    """Return one stable, current-profile page for runtime recovery."""
-
-    _require_publications_enabled()
-    if isinstance(limit, bool) or not 1 <= limit <= MAX_RECOVERY_BATCH:
-        raise RuntimeValidationError("publication intent limit must be from 1 to 20")
-    _current_profile(context, profile_id)
-    query = PublicationIntent.objects.filter(
-        workspace_id=context.workspace_id,
-        profile_id=profile_id,
-    ).order_by("id")
-    if cursor is not None:
-        query = query.filter(id__gt=cursor)
-    rows = list(query[: limit + 1])
-    page = rows[:limit]
-    return PublicationIntentPage(
-        items=tuple(_receipt(row) for row in page),
-        next_cursor=page[-1].id if len(rows) > limit else None,
-    )
-
-
-def due_publication_intents(
-    context: RuntimeContext,
-    profile_id: UUID,
-    limit: int = MAX_RECOVERY_BATCH,
-) -> tuple[PublicationIntentReceipt, ...]:
-    """Return due frozen work without opening a new model execution."""
-
-    _require_publications_enabled()
-    if isinstance(limit, bool) or not 1 <= limit <= MAX_RECOVERY_BATCH:
-        raise RuntimeValidationError("publication recovery limit must be from 1 to 20")
-    _current_profile(context, profile_id)
-    now = timezone.now()
-    rows = PublicationIntent.objects.filter(
-        workspace_id=context.workspace_id,
-        profile_id=profile_id,
-        state__in=[PublicationIntentState.FROZEN, PublicationIntentState.FAILED],
-        manifest_digest__isnull=False,
-        next_due_at__lte=now,
-    ).order_by("next_due_at", "id")[:limit]
-    return tuple(_receipt(row) for row in rows)
-
-
 def wake_due_publications(
     *, limit: int = MAX_RECOVERY_BATCH, cursor: str | None = None
 ) -> PublicationWakePage:
@@ -303,71 +249,6 @@ def _wake_publication_workspaces(workspace_ids: Sequence[UUID]) -> int:
             request_execution_wake_locked(workspace)
             woken += 1
     return woken
-
-
-def mark_publication_registered(
-    context: RuntimeContext,
-    profile_id: UUID,
-    publication_id: UUID,
-    revision: int | None,
-) -> PublicationIntentReceipt:
-    _require_publications_enabled()
-    with transaction.atomic():
-        _current_profile(context, profile_id)
-        intent = _locked_intent(context, profile_id, publication_id)
-        if intent.state == PublicationIntentState.REGISTERED:
-            return _receipt(intent)
-        if intent.manifest_digest is None:
-            raise RuntimeLeaseConflictError("publication snapshot is unavailable")
-        intent.state = PublicationIntentState.REGISTERED
-        intent.safe_error_code = ""
-        if revision is not None:
-            intent.cloud_revision = revision
-        intent.save(
-            update_fields=["state", "safe_error_code", "cloud_revision", "updated_at"]
-        )
-    return _receipt(intent)
-
-
-def defer_publication(
-    context: RuntimeContext,
-    profile_id: UUID,
-    publication_id: UUID,
-    error_code: str,
-) -> PublicationIntentReceipt:
-    """Keep a failed frozen publication durable for bounded explicit retry."""
-
-    _require_publications_enabled()
-    if not _SAFE_ERROR.fullmatch(error_code):
-        raise RuntimeValidationError("publication error code is invalid")
-    with transaction.atomic():
-        _current_profile(context, profile_id)
-        intent = _locked_intent(context, profile_id, publication_id)
-        if intent.manifest_digest is None:
-            raise RuntimeLeaseConflictError("publication snapshot is unavailable")
-        if intent.attempts >= MAX_PUBLICATION_ATTEMPTS:
-            intent.state = PublicationIntentState.FAILED
-            intent.safe_error_code = error_code
-            intent.save(update_fields=["state", "safe_error_code", "updated_at"])
-            return _receipt(intent)
-        intent.attempts += 1
-        intent.state = PublicationIntentState.FAILED
-        intent.safe_error_code = error_code
-        intent.next_due_at = timezone.now() + timedelta(
-            seconds=_BACKOFF_SECONDS[
-                min(intent.attempts - 1, len(_BACKOFF_SECONDS) - 1)
-            ]
-        )
-        intent.save(
-            update_fields=[
-                "attempts",
-                "state",
-                "safe_error_code",
-                "next_due_at",
-                "updated_at",
-            ]
-        )
-    return _receipt(intent)
 
 
 def cloud_publication_request(
@@ -926,18 +807,13 @@ def _require_publications_enabled() -> None:
 __all__ = [
     "MAX_PUBLICATION_ATTEMPTS",
     "MAX_RECOVERY_BATCH",
-    "PublicationIntentPage",
     "PublicationIntentReceipt",
     "PublicationWakePage",
     "acknowledge_frozen_publication",
     "claim_publication_retries",
     "cloud_publication_request",
     "create_publication_intent",
-    "defer_publication",
-    "due_publication_intents",
     "get_publication",
-    "list_publication_intents",
-    "mark_publication_registered",
     "record_publication_retry",
     "register_publication",
     "upload_publication_file",
