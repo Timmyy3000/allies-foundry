@@ -43,6 +43,93 @@ def _descriptor(content: bytes = b"content"):
     }
 
 
+def _trusted_publication_metadata(
+    monkeypatch, volume_root, directories, files_, calls, untrusted=()
+):
+    original_lstat = Path.lstat
+    original_os = files.os
+
+    class PosixOs:
+        name = "posix"
+
+        def __getattr__(self, name):
+            return getattr(original_os, name)
+
+        def chown(self, *args):
+            calls.append(("chown", *args))
+
+        def chmod(self, *args):
+            calls.append(("chmod", *args))
+
+    def lstat(path):
+        metadata = original_lstat(path)
+        if path == volume_root:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o1777,
+                st_uid=0,
+                st_gid=0,
+                st_size=metadata.st_size,
+            )
+        if path in directories:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700,
+                st_uid=0,
+                st_gid=0,
+                st_size=metadata.st_size,
+            )
+        if path in files_:
+            return SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o600,
+                st_uid=0,
+                st_gid=0,
+                st_size=metadata.st_size,
+            )
+        if path in untrusted:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700,
+                st_uid=10000,
+                st_gid=10000,
+                st_size=metadata.st_size,
+            )
+        return metadata
+
+    monkeypatch.setattr(files, "os", PosixOs())
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+
+def _legacy_spool(root, profile="ally"):
+    workspace = _workspace(root, profile)
+    spool_root = root / ".allies-publications" / profile
+    publication_id = str(uuid4())
+    source_version_id = str(uuid4())
+    snapshot = spool_root / publication_id
+    snapshot.mkdir(parents=True)
+    content = b"trusted"
+    frozen = files.PublicationFile(
+        source_version_id,
+        "result.csv",
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+        "1-result.csv",
+    )
+    (snapshot / frozen.spool_path).write_bytes(content)
+    manifest = files.PublicationManifest(
+        publication_id,
+        files._publication_digest((frozen,)),
+        (frozen,),
+    )
+    journal = spool_root / f"{publication_id}.json"
+    files._write_publication_manifest(journal, manifest, ())
+    return (
+        workspace,
+        spool_root,
+        snapshot,
+        journal,
+        snapshot / frozen.spool_path,
+        manifest,
+    )
+
+
 @pytest.mark.skipif(files.os.name == "nt", reason="POSIX-only permission boundary")
 def test_publication_spool_requires_root_owned_permissions(tmp_path, monkeypatch):
     actions = []
@@ -51,6 +138,7 @@ def test_publication_spool_requires_root_owned_permissions(tmp_path, monkeypatch
 
     monkeypatch.setattr(files.os, "chown", lambda *args: actions.append(args))
     monkeypatch.setattr(files.os, "chmod", lambda *args: actions.append(args))
+    monkeypatch.setattr(files, "_publication_state_root", lambda root: root)
 
     assert files._publication_spool_root(tmp_path, "ally") == spool
     assert actions == [
@@ -63,6 +151,7 @@ def test_publication_spool_requires_root_owned_permissions(tmp_path, monkeypatch
 
 @pytest.mark.skipif(files.os.name == "nt", reason="POSIX-only permission boundary")
 def test_publication_spool_rejects_unavailable_root_ownership(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "_publication_state_root", lambda root: root)
     monkeypatch.setattr(
         files.os,
         "chown",
@@ -73,11 +162,19 @@ def test_publication_spool_rejects_unavailable_root_ownership(tmp_path, monkeypa
         files._publication_spool_root(tmp_path, "ally")
 
 
-@pytest.mark.skipif(files.os.name == "nt", reason="POSIX-only permission boundary")
 def test_publication_ledger_requires_a_protected_parent(tmp_path, monkeypatch):
     state_root = tmp_path / files._PUBLICATION_STATE_DIRECTORY
     calls = []
     original_lstat = Path.lstat
+    monkeypatch.setattr(
+        files,
+        "os",
+        SimpleNamespace(
+            name="posix",
+            chown=lambda *args: calls.append(args),
+            chmod=lambda *args: calls.append(args),
+        ),
+    )
 
     def lstat(path):
         if path == tmp_path:
@@ -89,8 +186,6 @@ def test_publication_ledger_requires_a_protected_parent(tmp_path, monkeypatch):
         return original_lstat(path)
 
     monkeypatch.setattr(Path, "lstat", lstat)
-    monkeypatch.setattr(files.os, "chown", lambda *args: calls.append(args))
-    monkeypatch.setattr(files.os, "chmod", lambda *args: calls.append(args))
 
     assert files._publication_state_root(tmp_path) == state_root
     assert calls == [(state_root, 0, 0), (state_root, 0o700)]
@@ -110,13 +205,21 @@ def test_publication_ledger_requires_a_protected_parent(tmp_path, monkeypatch):
     assert not state_root.exists()
 
 
-@pytest.mark.skipif(files.os.name == "nt", reason="POSIX-only permission boundary")
 def test_publication_ledger_does_not_promote_existing_untrusted_state(
     tmp_path, monkeypatch
 ):
     state_root = tmp_path / files._PUBLICATION_STATE_DIRECTORY
     state_root.mkdir()
     original_lstat = Path.lstat
+    promoted = []
+    monkeypatch.setattr(
+        files,
+        "os",
+        SimpleNamespace(
+            name="posix",
+            chown=lambda *args: promoted.append(args),
+        ),
+    )
 
     def lstat(path):
         if path == tmp_path:
@@ -127,14 +230,63 @@ def test_publication_ledger_does_not_promote_existing_untrusted_state(
             )
         return original_lstat(path)
 
-    promoted = []
     monkeypatch.setattr(Path, "lstat", lstat)
-    monkeypatch.setattr(files.os, "chown", lambda *args: promoted.append(args))
 
     with pytest.raises(IncomingFileError, match="journal was unavailable"):
         files._publication_state_root(tmp_path)
 
     assert promoted == []
+
+
+def test_reconciliation_accepts_root_owned_legacy_spools(tmp_path, monkeypatch):
+    workspace, spool_root, snapshot, journal, frozen, manifest = _legacy_spool(tmp_path)
+    state = tmp_path / files._PUBLICATION_STATE_DIRECTORY
+    state.mkdir()
+    calls = []
+    _trusted_publication_metadata(
+        monkeypatch,
+        tmp_path,
+        {state, tmp_path / ".allies-publications", spool_root, snapshot},
+        {journal, frozen},
+        calls,
+    )
+
+    assert reconcile_publication_spools(tmp_path) == 1
+    assert recover_publication_manifests(workspace) == (manifest,)
+    record = json.loads(files._ledger_path(tmp_path).read_text())["records"][
+        manifest.publication_id
+    ]
+    assert record["profile"] == "ally"
+    assert record["size"] == len(b"trusted")
+    assert record["state"] == "frozen"
+    assert isinstance(record["updated_at"], int)
+    assert calls == []
+
+
+def test_reconciliation_rejects_hermes_owned_legacy_spools(tmp_path, monkeypatch):
+    workspace, spool_root, snapshot, journal, frozen, manifest = _legacy_spool(tmp_path)
+    state = tmp_path / files._PUBLICATION_STATE_DIRECTORY
+    state.mkdir()
+    calls = []
+    _trusted_publication_metadata(
+        monkeypatch,
+        tmp_path,
+        {state, spool_root, snapshot},
+        {journal, frozen},
+        calls,
+        {tmp_path / ".allies-publications"},
+    )
+
+    with pytest.raises(IncomingFileError, match="spool was unsafe"):
+        reconcile_publication_spools(tmp_path)
+    with pytest.raises(IncomingFileError, match="spool was unsafe"):
+        recover_publication_manifests(workspace)
+    with pytest.raises(IncomingFileError, match="spool was unsafe"):
+        publication_spool_path(
+            workspace, manifest.publication_id, manifest.files[0].source_version_id
+        )
+    assert files._read_ledger(tmp_path) == {}
+    assert calls == []
 
 
 @pytest.mark.usefixtures("root_owned_publication_spool")
@@ -300,6 +452,30 @@ def test_reservation_reconciles_frozen_spools_without_a_legacy_ledger(tmp_path):
     assert set(records) == {first.publication_id, second.publication_id}
     assert forged_id not in records
     assert (tmp_path / ".allies-publication-ledger.json").exists()
+
+
+@pytest.mark.usefixtures("root_owned_publication_spool")
+def test_reconciliation_does_not_restore_a_spool_released_during_its_scan(
+    tmp_path, monkeypatch
+):
+    workspace = _workspace(tmp_path)
+    (workspace / "result.csv").write_bytes(b"content")
+    manifest = freeze_publication(workspace, str(uuid4()), ["result.csv"])
+    original_snapshot_exists = files._publication_snapshot_exists
+    released = False
+
+    def release_after_discovery(spool_root, candidate):
+        nonlocal released
+        exists = original_snapshot_exists(spool_root, candidate)
+        if not released:
+            released = True
+            release_publication_spool(workspace, manifest.publication_id)
+        return exists
+
+    monkeypatch.setattr(files, "_publication_snapshot_exists", release_after_discovery)
+
+    assert reconcile_publication_spools(tmp_path) == 1
+    assert json.loads(files._ledger_path(tmp_path).read_text())["records"] == {}
 
 
 @pytest.mark.usefixtures("root_owned_publication_spool")

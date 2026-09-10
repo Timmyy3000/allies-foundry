@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -80,6 +81,12 @@ async def _handle(bridge, value: bytes) -> tuple[dict[str, object], _Writer]:
     writer = _Writer()
     await bridge._handle(reader, writer)
     return json.loads(writer.value), writer
+
+
+def _protected_state_root(root):
+    path = root / files._PUBLICATION_STATE_DIRECTORY
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @pytest.mark.asyncio
@@ -225,10 +232,9 @@ async def test_bridge_sets_the_root_owned_unix_socket_boundary(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(bridge_module.os.name == "nt", reason="POSIX-only bridge")
 @pytest.mark.usefixtures("root_owned_publication_spool")
 async def test_bridge_disables_publication_for_an_invalid_journal_without_stopping_worker(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
@@ -236,6 +242,18 @@ async def test_bridge_disables_publication_for_an_invalid_journal_without_stoppi
     manifest = freeze_publication(workspace, str(uuid4()), ["result.csv"])
     journal = files._ledger_path(tmp_path)
     journal.write_text("{", encoding="utf-8")
+    monkeypatch.setattr(
+        files,
+        "_publication_state_root",
+        _protected_state_root,
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "os",
+        SimpleNamespace(
+            name="posix", chown=lambda *_args: None, chmod=lambda *_args: None
+        ),
+    )
     calls = []
 
     class Worker:
@@ -256,7 +274,6 @@ async def test_bridge_disables_publication_for_an_invalid_journal_without_stoppi
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(bridge_module.os.name == "nt", reason="POSIX-only bridge")
 @pytest.mark.usefixtures("root_owned_publication_spool")
 @pytest.mark.parametrize("kind", ["file", "symlink"])
 async def test_bridge_disables_publication_for_an_untrusted_root(
@@ -266,19 +283,39 @@ async def test_bridge_disables_publication_for_an_untrusted_root(
     if kind == "file":
         root.write_text("hostile", encoding="utf-8")
     else:
-        target = tmp_path / "target"
-        target.mkdir()
-        root.symlink_to(target, target_is_directory=True)
+        root.write_text("hostile", encoding="utf-8")
+        original_lstat = Path.lstat
+        monkeypatch.setattr(
+            Path,
+            "lstat",
+            lambda path: (
+                SimpleNamespace(st_mode=bridge_module.stat.S_IFLNK | 0o777)
+                if path == root
+                else original_lstat(path)
+            ),
+        )
     monkeypatch.setattr(
         bridge_module,
         "grp",
         SimpleNamespace(getgrnam=lambda _name: SimpleNamespace(gr_gid=10001)),
     )
+    monkeypatch.setattr(
+        files,
+        "_publication_state_root",
+        _protected_state_root,
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "os",
+        SimpleNamespace(
+            name="posix", chown=lambda *_args: None, chmod=lambda *_args: None
+        ),
+    )
     bridge = PublicationBridge(object(), object(), tmp_path)
 
     assert await bridge.start() is False
     assert bridge._server is None
-    assert root.exists() or root.is_symlink()
+    assert root.exists()
 
 
 @pytest.mark.asyncio

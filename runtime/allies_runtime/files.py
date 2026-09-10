@@ -215,30 +215,24 @@ def publication_spool_path(
     workspace = _workspace(workspace)
     publication_id = _command_id(publication_id)
     source_version_id = _command_id(source_version_id)
-    manifest = _read_publication_manifest(
-        workspace.parent.parent.parent
-        / ".allies-publications"
-        / workspace.parent.name
-        / f"{publication_id}.json",
-        publication_id,
-        None,
-    )
+    volume_root = workspace.parent.parent.parent
+    root = volume_root / ".allies-publications"
+    spool_root = root / workspace.parent.name
+    if not _publication_directory(root, create=False) or not _publication_directory(
+        spool_root, create=False
+    ):
+        raise IncomingFileError("publication snapshot was unavailable")
+    manifest_path = spool_root / f"{publication_id}.json"
+    if _publication_file_metadata(manifest_path) is None:
+        raise IncomingFileError("publication snapshot was unavailable")
+    manifest = _read_publication_manifest(manifest_path, publication_id, None)
     if manifest is None:
         raise IncomingFileError("publication snapshot was unavailable")
     for item in manifest.files:
         if item.source_version_id == source_version_id:
-            path = (
-                workspace.parent.parent.parent
-                / ".allies-publications"
-                / workspace.parent.name
-                / publication_id
-                / item.spool_path
-            )
-            if (
-                path.is_symlink()
-                or not path.is_file()
-                or path.stat().st_size != item.size
-            ):
+            path = spool_root / publication_id / item.spool_path
+            metadata = _publication_file_metadata(path)
+            if metadata is None or metadata.st_size != item.size:
                 raise IncomingFileError("publication snapshot was unavailable")
             return path
     raise IncomingFileError("publication file was unavailable")
@@ -251,19 +245,14 @@ def release_publication_spool(workspace: Path, publication_id: str) -> None:
     publication_id = _command_id(publication_id)
     profile = workspace.parent
     volume_root = profile.parent.parent
-    spool_root = volume_root / ".allies-publications" / profile.name
+    root = volume_root / ".allies-publications"
+    spool_root = root / profile.name
     manifest_path = spool_root / f"{publication_id}.json"
     directory = spool_root / publication_id
-    if (
-        spool_root.is_symlink()
-        or manifest_path.is_symlink()
-        or directory.is_symlink()
-        or manifest_path.exists()
-        and not manifest_path.is_file()
-        or directory.exists()
-        and not directory.is_dir()
-    ):
-        raise IncomingFileError("publication spool was unsafe")
+    if _publication_directory(root, create=False):
+        _publication_directory(spool_root, create=False)
+        _publication_file_metadata(manifest_path)
+        _publication_directory(directory, create=False)
     if not _mark_publication_releasing(volume_root, profile.name, publication_id):
         return
     _complete_publication_release(spool_root, publication_id)
@@ -278,24 +267,26 @@ def recover_publication_manifests(
     workspace = _workspace(workspace)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
         raise IncomingFileError("publication recovery limit was invalid")
-    root = (
-        workspace.parent.parent.parent / ".allies-publications" / workspace.parent.name
-    )
-    if not root.exists():
+    volume_root = workspace.parent.parent.parent
+    root = volume_root / ".allies-publications"
+    if not _publication_directory(root, create=False):
         return ()
-    if root.is_symlink() or not root.is_dir():
-        raise IncomingFileError("publication spool was unsafe")
+    spool_root = root / workspace.parent.name
+    if not _publication_directory(spool_root, create=False):
+        return ()
     manifests: list[PublicationManifest] = []
-    for path in sorted(root.glob("*.json")):
+    for path in sorted(spool_root.glob("*.json")):
         try:
             publication_id = _command_id(path.stem)
         except IncomingFileError:
+            continue
+        if _publication_file_metadata(path) is None:
             continue
         try:
             manifest = _read_publication_manifest(path, publication_id, None)
         except IncomingFileError:
             continue
-        if manifest is not None:
+        if manifest is not None and _publication_snapshot_exists(spool_root, manifest):
             manifests.append(manifest)
         if len(manifests) == limit:
             break
@@ -309,11 +300,12 @@ def cleanup_profile_publication_spools(volume_root: Path, profile_key: str) -> N
         raise IncomingFileError("publication profile identity was invalid")
     root = volume_root / ".allies-publications"
     target = root / profile_key
-    if target.exists():
-        if target.is_symlink() or not target.is_dir():
-            raise IncomingFileError("publication spool was unsafe")
-        shutil.rmtree(target)
-        _sync_directory(root)
+    if _publication_directory(root, create=False):
+        if _publication_directory(target, create=False):
+            shutil.rmtree(target)
+            _sync_directory(root)
+    elif target.exists():
+        raise IncomingFileError("publication spool was unsafe")
     with _ledger_lock(volume_root):
         records = _read_ledger(volume_root)
         changed = False
@@ -331,12 +323,11 @@ def reconcile_publication_spools(volume_root: Path, limit: int = 100) -> int:
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
         raise IncomingFileError("publication reconciliation limit was invalid")
     root = volume_root / ".allies-publications"
-    if root.exists() and (root.is_symlink() or not root.is_dir()):
-        raise IncomingFileError("publication spool was unsafe")
+    root_exists = _publication_directory(root, create=False)
     _complete_releasing_publications(volume_root, root, limit)
-    if not root.exists():
+    if not root_exists:
         return 0
-    discovered: list[tuple[str, PublicationManifest]] = []
+    discovered: list[tuple[str, Path, str]] = []
     try:
         profiles = sorted(root.iterdir(), key=lambda item: item.name)
     except OSError:
@@ -344,8 +335,11 @@ def reconcile_publication_spools(volume_root: Path, limit: int = 100) -> int:
     for profile in profiles:
         if len(discovered) >= limit:
             break
-        if profile.is_symlink() or not profile.is_dir():
+        if profile.is_symlink():
+            raise IncomingFileError("publication spool was unsafe")
+        if not profile.is_dir():
             continue
+        _publication_directory(profile, create=False)
         try:
             journals = sorted(profile.glob("*.json"), key=lambda item: item.name)
         except OSError:
@@ -355,15 +349,30 @@ def reconcile_publication_spools(volume_root: Path, limit: int = 100) -> int:
                 break
             try:
                 publication_id = _command_id(journal.stem)
+            except IncomingFileError:
+                continue
+            if _publication_file_metadata(journal) is None:
+                continue
+            try:
                 manifest = _read_publication_manifest(journal, publication_id, None)
             except IncomingFileError:
                 continue
-            if manifest is not None:
-                discovered.append((profile.name, manifest))
+            if manifest is not None and _publication_snapshot_exists(profile, manifest):
+                discovered.append((profile.name, journal, publication_id))
     with _ledger_lock(volume_root):
         records = _read_ledger(volume_root)
         changed = False
-        for profile_key, manifest in discovered:
+        for profile_key, journal, publication_id in discovered:
+            spool_root = root / profile_key
+            if not _publication_directory(spool_root, create=False):
+                continue
+            if _publication_file_metadata(journal) is None:
+                continue
+            manifest = _read_publication_manifest(journal, publication_id, None)
+            if manifest is None or not _publication_snapshot_exists(
+                spool_root, manifest
+            ):
+                continue
             size = sum(item.size for item in manifest.files)
             current = records.get(manifest.publication_id)
             if current is None:
@@ -408,6 +417,7 @@ def _complete_releasing_publications(volume_root: Path, root: Path, limit: int) 
         spool_root = root / profile_key
         if spool_root.parent != root:
             raise IncomingFileError("publication reservation journal was invalid")
+        _publication_directory(spool_root, create=False)
         _complete_publication_release(spool_root, publication_id)
         completed.append((publication_id, profile_key))
     if not completed:
@@ -429,23 +439,14 @@ def _complete_releasing_publications(volume_root: Path, root: Path, limit: int) 
 
 
 def _complete_publication_release(spool_root: Path, publication_id: str) -> None:
-    if spool_root.exists() and (spool_root.is_symlink() or not spool_root.is_dir()):
-        raise IncomingFileError("publication spool was unsafe")
+    _publication_directory(spool_root, create=False)
     directory = spool_root / publication_id
     manifest_path = spool_root / f"{publication_id}.json"
-    if (
-        directory.is_symlink()
-        or manifest_path.is_symlink()
-        or directory.exists()
-        and not directory.is_dir()
-        or manifest_path.exists()
-        and not manifest_path.is_file()
-    ):
-        raise IncomingFileError("publication spool was unsafe")
-    if directory.exists():
+    if _publication_directory(directory, create=False):
         shutil.rmtree(directory)
-    manifest_path.unlink(missing_ok=True)
-    if spool_root.exists():
+    if _publication_file_metadata(manifest_path) is not None:
+        manifest_path.unlink()
+    if _publication_directory(spool_root, create=False):
         _sync_directory(spool_root)
 
 
@@ -463,8 +464,7 @@ def cleanup_stale_publication_copies(
     if not isinstance(observed, (int, float)) or isinstance(observed, bool):
         raise IncomingFileError("publication cleanup time was invalid")
     root = volume_root / ".allies-publications"
-    if root.exists() and (root.is_symlink() or not root.is_dir()):
-        raise IncomingFileError("publication spool was unsafe")
+    root_exists = _publication_directory(root, create=False)
     removed = 0
     with _ledger_lock(volume_root):
         records = _read_ledger(volume_root)
@@ -478,21 +478,16 @@ def cleanup_stale_publication_copies(
             ):
                 continue
             profile_root = root / str(record["profile"])
-            if profile_root.exists() and (
-                profile_root.is_symlink() or not profile_root.is_dir()
-            ):
-                raise IncomingFileError("publication spool was unsafe")
+            if root_exists:
+                _publication_directory(profile_root, create=False)
             manifest_path = profile_root / f"{publication_id}.json"
-            if manifest_path.exists():
+            if _publication_file_metadata(manifest_path) is not None:
                 continue
             final = profile_root / publication_id
             candidates = [final, *profile_root.glob(f".{publication_id}.*.copy")]
             for candidate in candidates:
-                if not candidate.exists():
-                    continue
-                if candidate.is_symlink() or not candidate.is_dir():
-                    raise IncomingFileError("publication spool was unsafe")
-                shutil.rmtree(candidate)
+                if _publication_directory(candidate, create=False):
+                    shutil.rmtree(candidate)
             if any(candidate.exists() for candidate in candidates):
                 continue
             del records[publication_id]
@@ -837,19 +832,73 @@ def _directory(path: Path) -> None:
         raise IncomingFileError("incoming file path was unsafe")
 
 
-def _publication_spool_root(volume_root: Path, profile_key: str) -> Path:
-    root = volume_root / ".allies-publications"
-    _directory(root)
-    spool_root = root / profile_key
-    _directory(spool_root)
-    if os.name != "nt":
+def _publication_directory(path: Path, *, create: bool) -> bool:
+    if os.name == "nt":
+        if not path.exists():
+            if not create:
+                return False
+            _directory(path)
+            return True
+        if path.is_symlink() or not path.is_dir():
+            raise IncomingFileError("publication spool was unsafe")
+        return True
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        if not create:
+            return False
         try:
-            os.chown(root, 0, 0)
-            os.chown(spool_root, 0, 0)
-            os.chmod(root, 0o700)
-            os.chmod(spool_root, 0o700)
+            path.mkdir(mode=0o700)
+            os.chown(path, 0, 0)
+            os.chmod(path, 0o700)
         except OSError:
             raise IncomingFileError("publication spool was unavailable") from None
+        return True
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise IncomingFileError("publication spool was unsafe")
+    return True
+
+
+def _publication_file_metadata(path: Path):
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or os.name != "nt"
+        and (metadata.st_uid != 0 or metadata.st_gid != 0)
+    ):
+        raise IncomingFileError("publication spool was unsafe")
+    return metadata
+
+
+def _publication_snapshot_exists(
+    spool_root: Path, manifest: PublicationManifest
+) -> bool:
+    snapshot = spool_root / manifest.publication_id
+    if not _publication_directory(snapshot, create=False):
+        return False
+    for file in manifest.files:
+        metadata = _publication_file_metadata(snapshot / file.spool_path)
+        if metadata is None or metadata.st_size != file.size:
+            return False
+    return True
+
+
+def _publication_spool_root(volume_root: Path, profile_key: str) -> Path:
+    _publication_state_root(volume_root)
+    root = volume_root / ".allies-publications"
+    _publication_directory(root, create=True)
+    spool_root = root / profile_key
+    _publication_directory(spool_root, create=True)
     return spool_root
 
 
