@@ -145,6 +145,14 @@ def _agent_tools(**capability: object) -> set[str]:
     return agent.valid_tool_names
 
 
+def _assert_private_capability(
+    expected: str, hidden: str, **capability: object
+) -> None:
+    tools = _agent_tools(**capability)
+    assert expected in tools
+    assert hidden not in tools
+
+
 def _test_private_capability_boundary() -> None:
     assert (
         not {
@@ -172,20 +180,38 @@ def _test_private_capability_boundary() -> None:
             "publish_files",
             "allies_routine_result",
         } & _agent_tools(enabled_toolsets=[composite])
+        _assert_private_capability(
+            "publish_files",
+            "allies_routine_result",
+            enabled_toolsets=[composite],
+            allies_file_publication=True,
+        )
+        _assert_private_capability(
+            "allies_routine_result",
+            "publish_files",
+            enabled_toolsets=[composite],
+            allies_routine_result=True,
+        )
     finally:
         TOOLSETS.pop(composite, None)
 
-    assert "publish_files" in _agent_tools(
-        enabled_toolsets=["all"], allies_file_publication=True
+    _assert_private_capability(
+        "publish_files", "allies_routine_result", allies_file_publication=True
     )
-    assert "allies_routine_result" not in _agent_tools(
-        enabled_toolsets=["all"], allies_file_publication=True
+    _assert_private_capability(
+        "publish_files",
+        "allies_routine_result",
+        enabled_toolsets=["all"],
+        allies_file_publication=True,
     )
-    assert "allies_routine_result" in _agent_tools(
-        enabled_toolsets=["all"], allies_routine_result=True
+    _assert_private_capability(
+        "allies_routine_result", "publish_files", allies_routine_result=True
     )
-    assert "publish_files" not in _agent_tools(
-        enabled_toolsets=["all"], allies_routine_result=True
+    _assert_private_capability(
+        "allies_routine_result",
+        "publish_files",
+        enabled_toolsets=["all"],
+        allies_routine_result=True,
     )
     try:
         _agent_tools(allies_file_publication=True, allies_routine_result=True)

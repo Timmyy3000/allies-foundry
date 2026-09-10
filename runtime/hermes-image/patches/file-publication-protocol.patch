@@ -301,6 +301,29 @@ index 0f12902..dadb66e 100644
                      )
              if skip_tool_execution_middleware:
                  result = _dispatch(function_args)
+diff --git a/tools/tool_search.py b/tools/tool_search.py
+index 686e0f3..e50ee1c 100644
+--- a/tools/tool_search.py
++++ b/tools/tool_search.py
+@@ -57,6 +57,9 @@ TOOL_DESCRIBE_NAME = "tool_describe"
+ TOOL_CALL_NAME = "tool_call"
+ 
+ BRIDGE_TOOL_NAMES = frozenset({TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME})
++_PRIVATE_DIRECT_TOOLSETS = frozenset(
++    {"allies-file-publication", "allies-routine-result"}
++)
+ 
+ # When estimating tokens from char count without a real tokenizer, this is
+ # the cheap rule of thumb that's stable across providers. Roughly 4 chars
+@@ -219,6 +222,8 @@ def is_deferrable_tool_name(name: str) -> bool:
+         entry = registry.get_entry(name)
+         if entry is None:
+             return False
++        if entry.toolset in _PRIVATE_DIRECT_TOOLSETS:
++            return False
+         if entry.toolset.startswith("mcp-"):
+             return True
+         # Non-MCP, non-core → plugin tool, eligible.
 diff --git a/run_agent.py b/run_agent.py
 index 23eb977..08b4bd9 100644
 --- a/run_agent.py

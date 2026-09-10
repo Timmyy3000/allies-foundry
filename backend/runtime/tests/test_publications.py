@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 from uuid import uuid4
 
 import pytest
@@ -53,11 +52,7 @@ def test_publication_upload_api_reads_the_bounded_binary_body(
             return publication_service.upload_publication_file(*args)
         return 202, {"state": "validating"}
 
-    monkeypatch.setattr(
-        importlib.import_module("runtime.api.register"),
-        "upload_publication_file",
-        receive,
-    )
+    monkeypatch.setattr("runtime.api.register.upload_publication_file", receive)
     path = (
         f"/api/v1/runtime/profiles/{profile.id}/file-publications/{uuid4()}"
         f"/files/{uuid4()}/content?generation=1"
