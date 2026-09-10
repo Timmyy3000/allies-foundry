@@ -95,7 +95,7 @@ class PublicationBridge:
 
     async def start(self) -> bool:
         self._available = False
-        if os.name == "nt":
+        if os.name == "nt" or os.geteuid() != 0:
             return False
         try:
             await asyncio.to_thread(

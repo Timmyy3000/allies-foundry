@@ -184,6 +184,17 @@ async def test_bridge_start_is_safe_without_unix_socket_support(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_unprivileged_bridge_start_leaves_no_shared_state(tmp_path, monkeypatch):
+    bridge = PublicationBridge(object(), object(), tmp_path)
+    monkeypatch.setattr(
+        bridge_module, "os", SimpleNamespace(name="posix", geteuid=lambda: 10000)
+    )
+    assert await bridge.start() is False
+    assert list(tmp_path.iterdir()) == []
+    assert bridge.activate(_claim()) is None
+
+
+@pytest.mark.asyncio
 async def test_bridge_sets_the_root_owned_unix_socket_boundary(tmp_path, monkeypatch):
     actions = []
 
@@ -200,6 +211,7 @@ async def test_bridge_sets_the_root_owned_unix_socket_boundary(tmp_path, monkeyp
 
     fake_os = SimpleNamespace(
         name="posix",
+        geteuid=lambda: 0,
         chown=lambda *args: actions.append(args),
         chmod=lambda *args: actions.append(args),
     )
@@ -254,7 +266,10 @@ async def test_bridge_disables_publication_for_an_invalid_journal_without_stoppi
         bridge_module,
         "os",
         SimpleNamespace(
-            name="posix", chown=lambda *_args: None, chmod=lambda *_args: None
+            name="posix",
+            geteuid=lambda: 0,
+            chown=lambda *_args: None,
+            chmod=lambda *_args: None,
         ),
     )
     monkeypatch.setattr(
@@ -286,7 +301,9 @@ async def test_bridge_rejects_an_empty_untrusted_volume_without_stopping_worker(
 ):
     original_lstat = Path.lstat
     monkeypatch.setattr(files, "os", SimpleNamespace(name="posix"))
-    monkeypatch.setattr(bridge_module, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(
+        bridge_module, "os", SimpleNamespace(name="posix", geteuid=lambda: 0)
+    )
     monkeypatch.setattr(
         Path,
         "lstat",
@@ -352,7 +369,10 @@ async def test_bridge_disables_publication_for_an_untrusted_root(
         bridge_module,
         "os",
         SimpleNamespace(
-            name="posix", chown=lambda *_args: None, chmod=lambda *_args: None
+            name="posix",
+            geteuid=lambda: 0,
+            chown=lambda *_args: None,
+            chmod=lambda *_args: None,
         ),
     )
     monkeypatch.setattr(

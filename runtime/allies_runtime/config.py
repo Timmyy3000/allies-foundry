@@ -279,8 +279,8 @@ class RuntimeSettings:
     activity_wait_enabled: bool = True
     activity_wait_seconds: float = 5.0
     rich_approvals_enabled: bool = True
-    file_input_enabled: bool = False
-    file_publication_enabled: bool = False
+    file_input_enabled: bool = True
+    file_publication_enabled: bool = True
 
 
 def load_settings(env: Mapping[str, object] | None = None) -> RuntimeSettings:
@@ -359,10 +359,10 @@ def load_settings(env: Mapping[str, object] | None = None) -> RuntimeSettings:
             values, "ALLIES_RICH_APPROVALS_ENABLED", True
         ),
         file_input_enabled=_observability_bool(
-            values, "ALLIES_RUNTIME_FILE_INPUT_ENABLED", False
+            values, "ALLIES_RUNTIME_FILE_INPUT_ENABLED", True
         ),
         file_publication_enabled=_observability_bool(
-            values, "ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED", False
+            values, "ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED", True
         ),
     )
 

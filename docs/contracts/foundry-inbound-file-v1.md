@@ -5,8 +5,10 @@ It does not publish files from Foundry to Cloud.
 
 ## Gates
 
-`ALLIES_RUNTIME_FILE_INPUT_ENABLED` defaults to `false` in the Foundry backend
-and runtime. This setting is a configuration gate. It is not a capability
+`ALLIES_RUNTIME_FILE_INPUT_ENABLED` defaults to `true` in the Foundry backend
+and runtime; set it to `false` only for an explicit shutdown. The publication
+flag, `ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED`, follows the same rule.
+These defaults are not a capability
 proof. Production use needs the Cloud delivery gate and a later
 generation-aware release proof for the deployed backend and runtime.
 
