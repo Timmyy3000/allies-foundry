@@ -143,8 +143,8 @@ def test_publication_spool_requires_root_owned_permissions(tmp_path, monkeypatch
     assert files._publication_spool_root(tmp_path, "ally") == spool
     assert actions == [
         (root, 0, 0),
-        (spool, 0, 0),
         (root, 0o700),
+        (spool, 0, 0),
         (spool, 0o700),
     ]
 
@@ -236,6 +236,18 @@ def test_publication_ledger_does_not_promote_existing_untrusted_state(
         files._publication_state_root(tmp_path)
 
     assert promoted == []
+
+
+def test_missing_spool_does_not_require_a_publication_journal(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        files,
+        "_publication_state_root",
+        lambda _root: (_ for _ in ()).throw(AssertionError("journal opened")),
+    )
+
+    cleanup_profile_publication_spools(tmp_path, "ally")
+    assert cleanup_stale_publication_copies(tmp_path) == 0
+    assert reconcile_publication_spools(tmp_path) == 0
 
 
 def test_reconciliation_accepts_root_owned_legacy_spools(tmp_path, monkeypatch):
@@ -924,6 +936,7 @@ def test_incoming_receipt_recovery_rejects_each_untrusted_component(tmp_path):
     assert not files._staged_files_match(workspace, (staged,))
 
 
+@pytest.mark.usefixtures("root_owned_publication_spool")
 def test_publication_copy_and_reservation_helpers_fence_unavailable_state(
     tmp_path, monkeypatch
 ):
@@ -1038,6 +1051,9 @@ def test_cleanup_rejects_forged_ledger_paths(
 def test_reconciliation_rejects_an_unreadable_spool_root(tmp_path, monkeypatch):
     root = tmp_path / ".allies-publications"
     root.mkdir()
+    state = tmp_path / files._PUBLICATION_STATE_DIRECTORY
+    state.mkdir()
+    _trusted_publication_metadata(monkeypatch, tmp_path, {state, root}, set(), [])
     original_iterdir = Path.iterdir
 
     def unreadable_iterdir(path):
@@ -1051,8 +1067,14 @@ def test_reconciliation_rejects_an_unreadable_spool_root(tmp_path, monkeypatch):
 
 
 def test_reconciliation_skips_an_unreadable_profile_spool(tmp_path, monkeypatch):
-    profile = tmp_path / ".allies-publications" / "ally"
+    root = tmp_path / ".allies-publications"
+    profile = root / "ally"
     profile.mkdir(parents=True)
+    state = tmp_path / files._PUBLICATION_STATE_DIRECTORY
+    state.mkdir()
+    _trusted_publication_metadata(
+        monkeypatch, tmp_path, {state, root, profile}, set(), []
+    )
     original_glob = Path.glob
 
     def unreadable_glob(path, pattern):

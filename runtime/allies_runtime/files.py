@@ -300,12 +300,12 @@ def cleanup_profile_publication_spools(volume_root: Path, profile_key: str) -> N
         raise IncomingFileError("publication profile identity was invalid")
     root = volume_root / ".allies-publications"
     target = root / profile_key
-    if _publication_directory(root, create=False):
-        if _publication_directory(target, create=False):
-            shutil.rmtree(target)
-            _sync_directory(root)
-    elif target.exists():
-        raise IncomingFileError("publication spool was unsafe")
+    root_exists = _publication_directory(root, create=False)
+    if not root_exists and not (volume_root / _PUBLICATION_STATE_DIRECTORY).exists():
+        return
+    if root_exists and _publication_directory(target, create=False):
+        shutil.rmtree(target)
+        _sync_directory(root)
     with _ledger_lock(volume_root):
         records = _read_ledger(volume_root)
         changed = False
@@ -324,6 +324,8 @@ def reconcile_publication_spools(volume_root: Path, limit: int = 100) -> int:
         raise IncomingFileError("publication reconciliation limit was invalid")
     root = volume_root / ".allies-publications"
     root_exists = _publication_directory(root, create=False)
+    if not root_exists and not (volume_root / _PUBLICATION_STATE_DIRECTORY).exists():
+        return 0
     _complete_releasing_publications(volume_root, root, limit)
     if not root_exists:
         return 0
@@ -465,6 +467,8 @@ def cleanup_stale_publication_copies(
         raise IncomingFileError("publication cleanup time was invalid")
     root = volume_root / ".allies-publications"
     root_exists = _publication_directory(root, create=False)
+    if not root_exists and not (volume_root / _PUBLICATION_STATE_DIRECTORY).exists():
+        return 0
     removed = 0
     with _ledger_lock(volume_root):
         records = _read_ledger(volume_root)
