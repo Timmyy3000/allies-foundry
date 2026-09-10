@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
@@ -30,6 +31,7 @@ from runtime.models import (
     PublicationIntent,
     PublicationIntentState,
     RuntimeProfile,
+    RuntimeProfileLifecycleState,
     Workspace,
 )
 
@@ -66,6 +68,12 @@ class PublicationIntentReceipt:
 class PublicationIntentPage:
     items: tuple[PublicationIntentReceipt, ...]
     next_cursor: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationWakePage:
+    woken: int
+    next_cursor: str | None
 
 
 def create_publication_intent(
@@ -159,7 +167,11 @@ def acknowledge_frozen_publication(
                     "updated_at",
                 ]
             )
-        should_register = intent.state != PublicationIntentState.REGISTERED
+        should_register = intent.state == PublicationIntentState.FROZEN or (
+            intent.state == PublicationIntentState.FAILED
+            and intent.attempts < MAX_PUBLICATION_ATTEMPTS
+            and intent.next_due_at <= timezone.now()
+        )
     receipt = _receipt(intent)
     if should_register:
         _register_frozen_intent(intent.id, frozen)
@@ -188,7 +200,7 @@ def list_publication_intents(
     page = rows[:limit]
     return PublicationIntentPage(
         items=tuple(_receipt(row) for row in page),
-        next_cursor=rows[limit].id if len(rows) > limit else None,
+        next_cursor=page[-1].id if len(rows) > limit else None,
     )
 
 
@@ -212,6 +224,85 @@ def due_publication_intents(
         next_due_at__lte=now,
     ).order_by("next_due_at", "id")[:limit]
     return tuple(_receipt(row) for row in rows)
+
+
+def wake_due_publications(
+    *, limit: int = MAX_RECOVERY_BATCH, cursor: str | None = None
+) -> PublicationWakePage:
+    """Wake bounded publication recovery without creating an execution."""
+
+    if not getattr(settings, "ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED", False):
+        return PublicationWakePage(0, None)
+    if isinstance(limit, bool) or not 1 <= limit <= MAX_RECOVERY_BATCH:
+        raise RuntimeValidationError("publication wake limit must be from 1 to 20")
+    if cursor is not None and (
+        not isinstance(cursor, str)
+        or not cursor
+        or len(cursor) > 512
+        or "\r" in cursor
+        or "\n" in cursor
+    ):
+        raise RuntimeValidationError("publication wake cursor is invalid")
+    observed = timezone.now()
+    workspace_ids = list(
+        PublicationIntent.objects.filter(
+            state__in=[PublicationIntentState.FROZEN, PublicationIntentState.FAILED],
+            manifest_digest__isnull=False,
+            next_due_at__lte=observed,
+            profile__lifecycle_state=RuntimeProfileLifecycleState.ACTIVE,
+        )
+        .order_by("next_due_at", "workspace_id")
+        .values_list("workspace_id", flat=True)
+        .distinct()[:limit]
+    )
+    query = urlencode({"limit": limit, **({"cursor": cursor} if cursor else {})})
+    try:
+        status, payload = cloud_publication_request(
+            "GET", f"/file-publication-retries/due-bindings?{query}"
+        )
+    except RuntimeNotReadyError:
+        return PublicationWakePage(_wake_publication_workspaces(workspace_ids), None)
+    next_cursor = payload.get("next_cursor") if 200 <= status < 300 else None
+    binding_ids = payload.get("binding_ids") if 200 <= status < 300 else []
+    if not isinstance(binding_ids, list) or len(binding_ids) > limit:
+        binding_ids = []
+    bindings: list[UUID] = []
+    for binding_id in binding_ids:
+        try:
+            bindings.append(UUID(str(binding_id)))
+        except (TypeError, ValueError):
+            continue
+    remaining = max(0, limit - len(workspace_ids))
+    if remaining:
+        workspace_ids.extend(
+            PublicationIntent.objects.filter(
+                cloud_binding_id__in=bindings,
+                profile__lifecycle_state=RuntimeProfileLifecycleState.ACTIVE,
+            )
+            .order_by("workspace_id")
+            .values_list("workspace_id", flat=True)
+            .distinct()[:remaining]
+        )
+    rendered_cursor = next_cursor if isinstance(next_cursor, str) else None
+    return PublicationWakePage(
+        _wake_publication_workspaces(workspace_ids), rendered_cursor
+    )
+
+
+def _wake_publication_workspaces(workspace_ids: Sequence[UUID]) -> int:
+    from .runtime_intents import request_execution_wake_locked
+
+    woken = 0
+    for workspace_id in dict.fromkeys(workspace_ids):
+        with transaction.atomic():
+            workspace = (
+                Workspace.objects.select_for_update().filter(pk=workspace_id).first()
+            )
+            if workspace is None:
+                continue
+            request_execution_wake_locked(workspace)
+            woken += 1
+    return woken
 
 
 def mark_publication_registered(
@@ -354,6 +445,17 @@ def register_publication(
             raise RuntimeLeaseConflictError(
                 "publication snapshot does not match intent"
             )
+        if intent.state == PublicationIntentState.FAILED and (
+            intent.attempts >= MAX_PUBLICATION_ATTEMPTS
+            or intent.next_due_at > timezone.now()
+        ):
+            raise RuntimeLeaseConflictError("publication retry is not due")
+        if intent.state not in {
+            PublicationIntentState.FROZEN,
+            PublicationIntentState.REGISTERED,
+            PublicationIntentState.FAILED,
+        }:
+            raise RuntimeLeaseConflictError("publication intent is not frozen")
         binding_id = intent.cloud_binding_id
         message_id = intent.cloud_message_id
     status, payload = cloud_publication_request(
@@ -553,7 +655,9 @@ def _register_frozen_intent(
     if 200 <= status < 300:
         _set_registered(intent.id, payload.get("revision"))
         return
-    _set_publication_failure(intent.id, str(payload.get("error_code") or "publication_unavailable"))
+    _set_publication_failure(
+        intent.id, str(payload.get("error_code") or "publication_unavailable")
+    )
     _project_publication_failure(intent.id)
 
 
@@ -583,14 +687,24 @@ def _set_publication_failure(publication_id: UUID, error_code: str) -> None:
     if not _SAFE_ERROR.fullmatch(error_code):
         error_code = "publication_unavailable"
     with transaction.atomic():
-        intent = PublicationIntent.objects.select_for_update().filter(pk=publication_id).first()
-        if intent is None or intent.manifest_digest is None or intent.attempts >= MAX_PUBLICATION_ATTEMPTS:
+        intent = (
+            PublicationIntent.objects.select_for_update()
+            .filter(pk=publication_id)
+            .first()
+        )
+        if (
+            intent is None
+            or intent.manifest_digest is None
+            or intent.attempts >= MAX_PUBLICATION_ATTEMPTS
+        ):
             return
         intent.attempts += 1
         intent.state = PublicationIntentState.FAILED
         intent.safe_error_code = error_code
         intent.next_due_at = timezone.now() + timedelta(
-            seconds=_BACKOFF_SECONDS[min(intent.attempts - 1, len(_BACKOFF_SECONDS) - 1)]
+            seconds=_BACKOFF_SECONDS[
+                min(intent.attempts - 1, len(_BACKOFF_SECONDS) - 1)
+            ]
         )
         intent.save(
             update_fields=[
@@ -814,6 +928,7 @@ __all__ = [
     "MAX_RECOVERY_BATCH",
     "PublicationIntentPage",
     "PublicationIntentReceipt",
+    "PublicationWakePage",
     "acknowledge_frozen_publication",
     "claim_publication_retries",
     "cloud_publication_request",
@@ -826,4 +941,5 @@ __all__ = [
     "record_publication_retry",
     "register_publication",
     "upload_publication_file",
+    "wake_due_publications",
 ]

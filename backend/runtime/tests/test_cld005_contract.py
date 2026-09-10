@@ -1175,6 +1175,11 @@ def test_event_delivery_command_bounds_power_work_around_delivery(monkeypatch):
     calls = []
     command_path = "runtime.management.commands.publish_event_deliveries"
     monkeypatch.setattr(
+        f"{command_path}.wake_due_publications",
+        lambda *, limit: calls.append(("publication", limit))
+        or type("Publication", (), {"woken": 0})(),
+    )
+    monkeypatch.setattr(
         f"{command_path}.process_runtime_wakes",
         lambda *, limit: (
             calls.append(("wake", limit))
@@ -1204,6 +1209,7 @@ def test_event_delivery_command_bounds_power_work_around_delivery(monkeypatch):
     call_command("publish_event_deliveries", stdout=output)
 
     assert calls == [
+        ("publication", 20),
         ("wake", 1),
         ("delivery", 1),
         ("cleanup", None),

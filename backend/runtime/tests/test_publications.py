@@ -6,7 +6,10 @@ import pytest
 from django.test import override_settings
 from django.utils import timezone
 
-from runtime.exceptions import RuntimeIdempotencyConflictError
+from runtime.exceptions import (
+    RuntimeIdempotencyConflictError,
+    RuntimeLeaseConflictError,
+)
 from runtime.models import (
     Execution,
     PublicationIntent,
@@ -21,6 +24,9 @@ from runtime.services.claims import claim_next_execution
 from runtime.services.publications import (
     acknowledge_frozen_publication,
     create_publication_intent,
+    list_publication_intents,
+    register_publication,
+    wake_due_publications,
 )
 from runtime.services.runtime_auth import (
     authenticate_runtime_token,
@@ -160,6 +166,68 @@ def test_intent_api_replays_the_same_tool_identity(publication_claim, client):
     assert frozen.json()["state"] == "frozen"
 
 
+@pytest.mark.django_db
+@override_settings(ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED=True)
+def test_intent_recovery_pages_without_skipping_the_boundary(publication_claim):
+    context, claim, profile, _execution, _token = publication_claim
+    for index in range(21):
+        create_publication_intent(
+            context,
+            claim.attempt_id,
+            claim.lease_token,
+            f"call-{index}",
+            [{"name": "result.csv", "size": 12}],
+        )
+
+    first = list_publication_intents(context, profile.id, 20)
+    second = list_publication_intents(context, profile.id, 20, first.next_cursor)
+
+    assert len(first.items) == 20
+    assert first.next_cursor == first.items[-1].publication_id
+    assert len(second.items) == 1
+
+
+@pytest.mark.django_db
+@override_settings(
+    ALLIES_RUNTIME_FILE_PUBLICATION_ENABLED=True,
+    ALLIES_CLOUD_URL="https://cloud.example.test",
+    ALLIES_CLOUD_EVENT_SERVICE_TOKEN="foundry-event-token",
+)
+def test_due_publication_wake_uses_existing_workspace_operation_without_an_execution(
+    publication_claim, monkeypatch
+):
+    context, claim, _profile, execution, _token = publication_claim
+    intent = create_publication_intent(
+        context,
+        claim.attempt_id,
+        claim.lease_token,
+        "call-wake",
+        [{"name": "result.csv", "size": 12}],
+    )
+    PublicationIntent.objects.filter(pk=intent.publication_id).update(
+        state=PublicationIntentState.FROZEN,
+        manifest_digest="a" * 64,
+        next_due_at=timezone.now(),
+    )
+    monkeypatch.setattr(
+        publication_service,
+        "cloud_publication_request",
+        lambda method, path: (
+            200,
+            {
+                "binding_ids": [str(execution.cloud_binding_id)],
+                "next_cursor": "next-page",
+            },
+        ),
+    )
+
+    page = wake_due_publications(limit=20)
+
+    assert page.woken == 1
+    assert page.next_cursor == "next-page"
+    assert Execution.objects.count() == 1
+
+
 class _CloudResponse:
     def __init__(self, status, body):
         self.status = status
@@ -178,7 +246,9 @@ class _CloudResponse:
     ALLIES_CLOUD_URL="https://cloud.example.test",
     ALLIES_CLOUD_EVENT_SERVICE_TOKEN="foundry-event-token",
 )
-def test_frozen_intent_replays_the_exact_cloud_reservation(publication_claim, monkeypatch):
+def test_frozen_intent_replays_the_exact_cloud_reservation(
+    publication_claim, monkeypatch
+):
     context, claim, profile, _execution, _token = publication_claim
     requests = []
 
@@ -217,6 +287,19 @@ def test_frozen_intent_replays_the_exact_cloud_reservation(publication_claim, mo
     acknowledge_frozen_publication(
         context, profile.id, intent.publication_id, frozen_files
     )
+    assert len(requests) == 2
+    with pytest.raises(RuntimeLeaseConflictError, match="not due"):
+        register_publication(
+            context,
+            claim.attempt_id,
+            claim.lease_token,
+            intent.publication_id,
+            frozen_files,
+        )
+    assert len(requests) == 2
+    PublicationIntent.objects.filter(pk=intent.publication_id).update(
+        next_due_at=timezone.now()
+    )
     acknowledge_frozen_publication(
         context, profile.id, intent.publication_id, frozen_files
     )
@@ -231,13 +314,17 @@ def test_frozen_intent_replays_the_exact_cloud_reservation(publication_claim, mo
     assert request.get_header("Idempotency-key") == str(intent.publication_id)
     assert request.data == (
         b'{"binding_id":"'
-        + str(PublicationIntent.objects.get(pk=intent.publication_id).cloud_binding_id).encode()
+        + str(
+            PublicationIntent.objects.get(pk=intent.publication_id).cloud_binding_id
+        ).encode()
         + b'","files":[{"name":"result.csv","sha256":"'
         + b"a" * 64
         + b'","size":12,"source_version_id":"'
         + frozen_files[0]["source_version_id"].encode()
         + b'"}],"message_id":"'
-        + str(PublicationIntent.objects.get(pk=intent.publication_id).cloud_message_id).encode()
+        + str(
+            PublicationIntent.objects.get(pk=intent.publication_id).cloud_message_id
+        ).encode()
         + b'","publication_id":"'
         + str(intent.publication_id).encode()
         + b'"}'
@@ -250,9 +337,13 @@ def test_frozen_intent_replays_the_exact_cloud_reservation(publication_claim, mo
     assert failure_request.get_header("Authorization") == "Bearer foundry-event-token"
     assert failure_request.data == (
         b'{"binding_id":"'
-        + str(PublicationIntent.objects.get(pk=intent.publication_id).cloud_binding_id).encode()
+        + str(
+            PublicationIntent.objects.get(pk=intent.publication_id).cloud_binding_id
+        ).encode()
         + b'","error_code":"publication_unavailable","message_id":"'
-        + str(PublicationIntent.objects.get(pk=intent.publication_id).cloud_message_id).encode()
+        + str(
+            PublicationIntent.objects.get(pk=intent.publication_id).cloud_message_id
+        ).encode()
         + b'","publication_id":"'
         + str(intent.publication_id).encode()
         + b'","state":"failed"}'
