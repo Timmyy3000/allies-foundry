@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -292,6 +293,8 @@ class PublicationBridge:
                             local_file.source_version_id,
                         )
                         content = await asyncio.to_thread(content_path.read_bytes)
+                        if hashlib.sha256(content).hexdigest() != local_file.sha256:
+                            raise IncomingFileError("publication source digest changed")
                         await self._foundry.upload_publication_file(
                             profile_id,
                             publication_id,

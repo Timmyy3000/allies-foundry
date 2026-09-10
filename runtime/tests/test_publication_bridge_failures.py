@@ -230,7 +230,9 @@ async def test_bridge_cancellation_fences_preparation_and_freeze(tmp_path, monke
         bridge.deactivate(context)
         return []
 
-    monkeypatch.setattr(bridge_module, "prepare_publication_files", revoke_during_prepare)
+    monkeypatch.setattr(
+        bridge_module, "prepare_publication_files", revoke_during_prepare
+    )
     assert await bridge.publish(context, "call-1", []) == {
         "state": "failed",
         "retryable": True,
@@ -289,7 +291,9 @@ async def test_bridge_rejects_invalid_reservations_and_cloud_poll_responses(tmp_
 
 
 @pytest.mark.asyncio
-async def test_bridge_fences_claim_loss_after_intent_and_spool_reads(tmp_path, monkeypatch):
+async def test_bridge_fences_claim_loss_after_intent_and_spool_reads(
+    tmp_path, monkeypatch
+):
     workspace = tmp_path / "profiles" / "ally" / "workspace"
     workspace.mkdir(parents=True)
     (workspace / "result.csv").write_bytes(b"frozen bytes")
@@ -530,13 +534,16 @@ async def test_bridge_keeps_the_frozen_spool_when_context_is_revoked_after_regis
         "error_code": "publication_context_invalid",
     }
     assert uploads == []
-    assert publication_spool_path(
-        workspace,
-        publication_id,
-        freeze_publication(workspace, publication_id, ["result.csv"])
-        .files[0]
-        .source_version_id,
-    ).read_bytes() == b"frozen bytes"
+    assert (
+        publication_spool_path(
+            workspace,
+            publication_id,
+            freeze_publication(workspace, publication_id, ["result.csv"])
+            .files[0]
+            .source_version_id,
+        ).read_bytes()
+        == b"frozen bytes"
+    )
 
 
 @pytest.mark.asyncio
@@ -571,9 +578,7 @@ async def test_bridge_reports_a_failed_or_expired_cloud_publication(tmp_path):
 def test_bridge_rejects_malformed_cloud_rows_and_ready_links():
     source_id = str(uuid4())
     manifest = SimpleNamespace(
-        files=(
-            SimpleNamespace(source_version_id=source_id, sha256="a" * 64, size=3),
-        )
+        files=(SimpleNamespace(source_version_id=source_id, sha256="a" * 64, size=3),)
     )
     row = {"source_version_id": source_id, "sha256": "a" * 64, "size": 3}
 
@@ -586,12 +591,17 @@ def test_bridge_rejects_malformed_cloud_rows_and_ready_links():
             _uuid(value)
     with pytest.raises(ValueError):
         _generation(False)
-    assert _ready_view({"state": "ready", "files": ["bad"]}, source_id)[
-        "error_code"
-    ] == "publication_response_invalid"
-    assert _ready_view(
-        {"state": "ready", "files": [{"name": "name", "open_path": None}]}, source_id
-    )["error_code"] == "publication_response_invalid"
+    assert (
+        _ready_view({"state": "ready", "files": ["bad"]}, source_id)["error_code"]
+        == "publication_response_invalid"
+    )
+    assert (
+        _ready_view(
+            {"state": "ready", "files": [{"name": "name", "open_path": None}]},
+            source_id,
+        )["error_code"]
+        == "publication_response_invalid"
+    )
 
 
 @pytest.mark.asyncio
@@ -611,9 +621,12 @@ async def test_recovery_retains_spools_for_failed_acknowledgements_and_claims(tm
     bridge = PublicationBridge(Foundry(), _Store(workspace), tmp_path)
     await bridge.recover(str(uuid4()), "ally")
 
-    assert publication_spool_path(
-        workspace, manifest.publication_id, manifest.files[0].source_version_id
-    ).read_bytes() == b"frozen bytes"
+    assert (
+        publication_spool_path(
+            workspace, manifest.publication_id, manifest.files[0].source_version_id
+        ).read_bytes()
+        == b"frozen bytes"
+    )
 
 
 @pytest.mark.asyncio
@@ -710,13 +723,18 @@ async def test_recovery_keeps_a_spool_when_a_reclaimed_upload_fails(tmp_path):
     bridge = PublicationBridge(Foundry(), _Store(workspace), tmp_path)
     await bridge.recover(str(uuid4()), "ally")
 
-    assert publication_spool_path(
-        workspace, manifest.publication_id, local.source_version_id
-    ).read_bytes() == b"frozen bytes"
+    assert (
+        publication_spool_path(
+            workspace, manifest.publication_id, local.source_version_id
+        ).read_bytes()
+        == b"frozen bytes"
+    )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("spool_state", ["missing", "corrupt", "unreadable"])
+@pytest.mark.parametrize(
+    "spool_state", ["missing", "corrupt", "unreadable", "changed_bytes"]
+)
 async def test_recovery_reports_unavailable_spools_with_the_claim_fence(
     tmp_path, monkeypatch, spool_state
 ):
@@ -732,7 +750,14 @@ async def test_recovery_reports_unavailable_spools_with_the_claim_fence(
     )
     if spool_state == "corrupt":
         journal.write_text("{", encoding="utf-8")
+    elif spool_state == "changed_bytes":
+        source = publication_spool_path(
+            workspace, manifest.publication_id, manifest.files[0].source_version_id
+        )
+        source.write_bytes(b"changed data")
+        assert source.stat().st_size == manifest.files[0].size
     elif spool_state == "unreadable":
+
         def unreadable_manifest_scan(*_args, **_kwargs):
             raise OSError("spool unavailable")
 
@@ -771,11 +796,16 @@ async def test_recovery_reports_unavailable_spools_with_the_claim_fence(
             reported.append(args)
             return {}
 
+        async def upload_publication_file(self, *_args):
+            pytest.fail("unavailable source bytes must not be uploaded")
+
     bridge = PublicationBridge(Foundry(), _Store(workspace), tmp_path)
     await bridge.recover(str(uuid4()), "ally")
 
     assert len(reported) == 1
-    profile_id, publication_id, sent_revision, sent_lease, outcome, error_code = reported[0]
+    profile_id, publication_id, sent_revision, sent_lease, outcome, error_code = (
+        reported[0]
+    )
     assert profile_id and publication_id == manifest.publication_id
     assert (sent_revision, sent_lease, outcome, error_code) == (
         revision,
