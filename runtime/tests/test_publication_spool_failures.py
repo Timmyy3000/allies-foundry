@@ -102,7 +102,12 @@ def test_preparation_and_freeze_reject_bad_sources_and_release_reservations(
     with pytest.raises(IncomingFileError, match="could not be committed"):
         freeze_publication(workspace, str(uuid4()), ["result.csv"])
 
-    assert json.loads((tmp_path / ".allies-publication-ledger.json").read_text())["records"] == {}
+    assert (
+        json.loads((tmp_path / ".allies-publication-ledger.json").read_text())[
+            "records"
+        ]
+        == {}
+    )
 
 
 @pytest.mark.usefixtures("root_owned_publication_spool")
@@ -172,13 +177,18 @@ def test_profile_cleanup_removes_only_its_ledger_records(tmp_path):
     cleanup_profile_publication_spools(tmp_path, "ally")
 
     assert not (tmp_path / ".allies-publications" / "ally").exists()
-    assert manifest.publication_id not in json.loads(
-        (tmp_path / ".allies-publication-ledger.json").read_text()
-    )["records"]
+    assert (
+        manifest.publication_id
+        not in json.loads((tmp_path / ".allies-publication-ledger.json").read_text())[
+            "records"
+        ]
+    )
 
 
 @pytest.mark.usefixtures("root_owned_publication_spool")
-def test_reconciliation_repairs_a_wrong_ledger_record_and_bounds_invalid_input(tmp_path):
+def test_reconciliation_repairs_a_wrong_ledger_record_and_bounds_invalid_input(
+    tmp_path,
+):
     assert reconcile_publication_spools(tmp_path) == 0
     with pytest.raises(IncomingFileError, match="limit"):
         reconcile_publication_spools(tmp_path, False)
@@ -237,9 +247,12 @@ def test_partial_cleanup_keeps_journaled_work_and_releases_only_deleted_copy_res
 
     assert cleanup_stale_publication_copies(tmp_path, now=24 * 60 * 60 + 1) == 1
     assert not stale.exists()
-    assert journaled_id in json.loads(
-        (tmp_path / ".allies-publication-ledger.json").read_text()
-    )["records"]
+    assert (
+        journaled_id
+        in json.loads((tmp_path / ".allies-publication-ledger.json").read_text())[
+            "records"
+        ]
+    )
 
 
 def test_incoming_file_contract_rejects_malformed_metadata_and_context():
@@ -290,7 +303,9 @@ async def test_stage_rejects_non_streaming_or_invalid_stream_chunks(tmp_path):
         yield b"unreachable"
 
     with pytest.raises(IncomingFileError, match="transport failed"):
-        await stage_incoming_files(workspace, str(uuid4()), [descriptor], failing_chunks)
+        await stage_incoming_files(
+            workspace, str(uuid4()), [descriptor], failing_chunks
+        )
 
 
 @pytest.mark.asyncio
@@ -330,7 +345,9 @@ async def test_stage_rejects_a_corrupt_durable_receipt(tmp_path):
         await stage_incoming_files(workspace, command_id, [_descriptor()], chunks)
 
 
-def test_publication_copy_checks_paths_and_detects_source_changes(tmp_path, monkeypatch):
+def test_publication_copy_checks_paths_and_detects_source_changes(
+    tmp_path, monkeypatch
+):
     workspace = _workspace(tmp_path)
     destination = tmp_path / "spool"
     destination.mkdir()
@@ -364,7 +381,9 @@ def test_publication_manifest_reader_rejects_corrupt_durable_journals(tmp_path):
     workspace = _workspace(tmp_path)
     (workspace / "result.csv").write_bytes(b"content")
     manifest = freeze_publication(workspace, str(uuid4()), ["result.csv"])
-    journal = tmp_path / ".allies-publications" / "ally" / f"{manifest.publication_id}.json"
+    journal = (
+        tmp_path / ".allies-publications" / "ally" / f"{manifest.publication_id}.json"
+    )
     base = json.loads(journal.read_text())
 
     journal.write_text("not json", encoding="utf-8")
@@ -434,20 +453,23 @@ def test_publication_ledger_reader_rejects_invalid_reservations(tmp_path):
             files._read_ledger(tmp_path)
 
 
-def test_publication_reservation_enforces_each_shared_volume_bound(tmp_path, monkeypatch):
+def test_publication_reservation_enforces_each_shared_volume_bound(
+    tmp_path, monkeypatch
+):
     def record(profile="ally", size=1, state="frozen"):
         return {"profile": profile, "size": size, "state": state, "updated_at": 0}
 
     same_root = tmp_path / "same"
-    files._write_ledger(same_root, {"same": record()})
-    files._reserve_publication(same_root, "ally", "same", 1)
+    same_id = str(uuid4())
+    files._write_ledger(same_root, {same_id: record()})
+    files._reserve_publication(same_root, "ally", same_id, 1)
     with pytest.raises(IncomingFileError, match="conflicted"):
-        files._reserve_publication(same_root, "ally", "same", 2)
+        files._reserve_publication(same_root, "ally", same_id, 2)
 
     profile_count_root = tmp_path / "profile-count"
     files._write_ledger(
         profile_count_root,
-        {f"record-{index}": record() for index in range(files.MAX_PUBLICATION_MANIFESTS)},
+        {str(uuid4()): record() for _ in range(files.MAX_PUBLICATION_MANIFESTS)},
     )
     with pytest.raises(IncomingFileError, match="capacity"):
         files._reserve_publication(profile_count_root, "ally", "new", 1)
@@ -455,14 +477,18 @@ def test_publication_reservation_enforces_each_shared_volume_bound(tmp_path, mon
     incomplete_root = tmp_path / "incomplete"
     files._write_ledger(
         incomplete_root,
-        {f"copy-{index}": record(state="copying") for index in range(files.MAX_PUBLICATION_INCOMPLETE)},
+        {
+            str(uuid4()): record(state="copying")
+            for _ in range(files.MAX_PUBLICATION_INCOMPLETE)
+        },
     )
     with pytest.raises(IncomingFileError, match="capacity"):
         files._reserve_publication(incomplete_root, "ally", "new", 1)
 
     profile_size_root = tmp_path / "profile-size"
     files._write_ledger(
-        profile_size_root, {"full": record(size=files.MAX_PROFILE_PUBLICATION_BYTES)}
+        profile_size_root,
+        {str(uuid4()): record(size=files.MAX_PROFILE_PUBLICATION_BYTES)},
     )
     with pytest.raises(IncomingFileError, match="capacity"):
         files._reserve_publication(profile_size_root, "ally", "new", 1)
@@ -470,13 +496,19 @@ def test_publication_reservation_enforces_each_shared_volume_bound(tmp_path, mon
     volume_size_root = tmp_path / "volume-size"
     files._write_ledger(
         volume_size_root,
-        {"full": record(profile="other", size=files.MAX_VOLUME_PUBLICATION_BYTES)},
+        {
+            str(uuid4()): record(
+                profile="other", size=files.MAX_VOLUME_PUBLICATION_BYTES
+            )
+        },
     )
     with pytest.raises(IncomingFileError, match="capacity"):
         files._reserve_publication(volume_size_root, "ally", "new", 1)
 
     free_space_root = tmp_path / "free-space"
-    monkeypatch.setattr(files.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+    monkeypatch.setattr(
+        files.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0)
+    )
     with pytest.raises(IncomingFileError, match="capacity"):
         files._reserve_publication(free_space_root, "ally", "new", 1)
 
@@ -516,7 +548,12 @@ def test_publication_freeze_and_journal_transitions_reject_stale_or_missing_stat
 
     with pytest.raises(IncomingFileError, match="spool state was invalid"):
         freeze_publication(workspace, publication_id, ["result.csv"])
-    assert json.loads((tmp_path / ".allies-publication-ledger.json").read_text())["records"] == {}
+    assert (
+        json.loads((tmp_path / ".allies-publication-ledger.json").read_text())[
+            "records"
+        ]
+        == {}
+    )
 
     files._reserve_publication(tmp_path, "ally", publication_id, 1)
     files._mark_publication_frozen(tmp_path, publication_id)
@@ -635,7 +672,9 @@ def test_publication_copy_and_reservation_helpers_fence_unavailable_state(
     destination = tmp_path / "destination"
     destination.mkdir()
 
-    monkeypatch.setattr(files.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+    monkeypatch.setattr(
+        files.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0)
+    )
     with pytest.raises(IncomingFileError, match="capacity"):
         files._copy_publication_file(workspace, Path("result.csv"), destination, 1)
     assert not list(destination.iterdir())
@@ -668,9 +707,10 @@ def test_reconciliation_completes_an_interrupted_durable_spool_release(
         release_publication_spool(workspace, manifest.publication_id)
 
     ledger_path = tmp_path / ".allies-publication-ledger.json"
-    assert json.loads(ledger_path.read_text())["records"][manifest.publication_id][
-        "state"
-    ] == "releasing"
+    assert (
+        json.loads(ledger_path.read_text())["records"][manifest.publication_id]["state"]
+        == "releasing"
+    )
     assert (spool_root / f"{manifest.publication_id}.json").exists()
 
     monkeypatch.setattr(files, "_complete_publication_release", original)
@@ -693,21 +733,44 @@ def test_reconciliation_releases_a_completed_spool_before_ledger_cleanup(tmp_pat
     assert ledger["records"] == {}
 
 
-def test_reconciliation_rejects_releasing_ledger_path_escape(tmp_path):
+@pytest.mark.parametrize("state", ["copying", "releasing"])
+@pytest.mark.parametrize(
+    "profile, publication_id",
+    [
+        ("..", None),
+        ("../outside", None),
+        ("/outside", None),
+        ("C:\\outside", None),
+        ("ally", ".."),
+        ("ally", "../outside"),
+        ("ally", "*"),
+        ("ally", "/outside"),
+    ],
+)
+def test_cleanup_rejects_forged_ledger_paths(
+    tmp_path, monkeypatch, state, profile, publication_id
+):
+    deleted = []
+    monkeypatch.setattr(files.shutil, "rmtree", lambda path: deleted.append(path))
+    (tmp_path / ".allies-publications" / "ally").mkdir(parents=True)
     files._write_ledger(
         tmp_path,
         {
-            str(uuid4()): {
-                "profile": "..",
+            publication_id or str(uuid4()): {
+                "profile": profile,
                 "size": 1,
-                "state": "releasing",
+                "state": state,
                 "updated_at": 0,
             }
         },
     )
 
     with pytest.raises(IncomingFileError, match="reservation journal was invalid"):
-        reconcile_publication_spools(tmp_path)
+        if state == "copying":
+            cleanup_stale_publication_copies(tmp_path, now=10_000)
+        else:
+            reconcile_publication_spools(tmp_path)
+    assert deleted == []
 
 
 def test_reconciliation_rejects_an_unreadable_spool_root(tmp_path, monkeypatch):

@@ -1204,12 +1204,21 @@ def _read_ledger(volume_root: Path) -> dict[str, dict[str, object]]:
     for key, record in records.items():
         if not isinstance(key, str) or not isinstance(record, Mapping):
             raise IncomingFileError("publication reservation journal was invalid")
+        try:
+            if str(UUID(key)) != key:
+                raise ValueError
+        except ValueError:
+            raise IncomingFileError(
+                "publication reservation journal was invalid"
+            ) from None
         profile = record.get("profile")
         size = record.get("size")
         state = record.get("state")
         updated_at = record.get("updated_at", 0)
         if (
             not isinstance(profile, str)
+            or profile in {"", ".", ".."}
+            or any(character in profile for character in "/\\:\x00")
             or not isinstance(size, int)
             or isinstance(size, bool)
             or size < 0
