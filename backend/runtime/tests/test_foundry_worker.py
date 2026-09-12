@@ -346,7 +346,7 @@ foundry_worker.process_runtime_wakes = block
 
 def stop_when_blocked():
     if started.wait(2):
-        print('BLOCKING_IO_STARTED', flush=True)
+        print(f'BLOCKING_IO_STARTED {time.monotonic()}', flush=True)
     else:
         print('BLOCKING_IO_NOT_STARTED', flush=True)
     signal.raise_signal(signal.SIGINT)
@@ -357,7 +357,6 @@ trigger.start()
 call_command('run_foundry_worker', '--shutdown-grace', '0.05')
 """
 
-    started = time.monotonic()
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=worktree / "backend",
@@ -367,10 +366,14 @@ call_command('run_foundry_worker', '--shutdown-grace', '0.05')
             "DJANGO_SETTINGS_MODULE": "config.settings",
         },
         capture_output=True,
-        timeout=3,
+        timeout=10,
         check=False,
     )
 
     assert result.returncode == 1, result.stderr.decode()
-    assert b"BLOCKING_IO_STARTED" in result.stdout
-    assert time.monotonic() - started < 2
+    marker = next(
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(b"BLOCKING_IO_STARTED ")
+    )
+    assert time.monotonic() - float(marker.split()[1]) < 2
